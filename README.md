@@ -35,14 +35,11 @@
 
 这些是**思路借鉴**，不是代码依赖；每个项目的代码各自独立，本仓库没有复制它们的实现。
 
-- **dsh-fish** —— 宿主骨架、四阶段门、叫醒只给处境；本项目从它的形态长出来。npm：<https://www.npmjs.com/package/dsh-fish>
-- **dsh-fish-memory** —— 记忆鲜活度与半衰期、中文双字组检索、命中才注入。
-- **dsh-fish-river** —— 三层记忆（成长 / 关系 / 流水）、群聊不污染人格。
+- **dsh-fish** —— 事件流 + 纯函数派生 + 面板形态，本项目的骨架从它长出来。npm：<https://www.npmjs.com/package/@ssamurias/dsh-fish>
+- **dsh-fish-memory** —— 记忆鲜活度与半衰期、中文检索。
+- **Character Card V2** —— `export.js` 的 CCv2 导出格式。
 - **dsh-companion** —— 好感分档、关系产品化的样本。
-- **Character Card V2** —— 卡片格式兼容（CCv2 导出）。
-- **Generative Agents** —— memory stream + 定期 reflection。
-- **DUMA / 双流** —— 快慢两模型、冲突才二次调用。
-- **dsh-fish-tone / persona_core** —— 语病密度、单轮人格变化上限。
+- **Generative Agents** —— memory stream + 定期 reflection 的启发。
 - **DeepSeek Harness** —— 宿主、插件体系、slots / systemPrompt / tools。
 - **双鱼座性格的公开资料**（经 Exa 检索整理）—— 她的性格起点。
 - **所有养过鱼的人** —— 社区里"把 AI 当室友养"的尝试。
