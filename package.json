@@ -1,6 +1,6 @@
 {
   "name": "dsh-pisces",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": false,
   "description": "鱼肥生双：一只会长大的本地小鱼（DSH 插件）。事件流记忆、渐进揭开、好感、新手引导；派希丝是养成目标。",
   "type": "module",
@@ -15,7 +15,8 @@
     "lib",
     "assets",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "THIRD-PARTY-NOTICES.md"
   ],
   "engines": {
     "node": ">=20"
