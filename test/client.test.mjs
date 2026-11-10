@@ -96,17 +96,14 @@ test('六个页签的标签都在，「鸣谢」排在「反馈」之后', () =>
   )
 })
 
-test('鸣谢页：十一个借鉴来源的名头与关键文案都在源码里（语音声线不进鸣谢）', () => {
+test('鸣谢页：八个借鉴来源的名头与关键文案都在源码里（语音声线不进鸣谢）', () => {
   for (const word of [
     '鸣谢',
     'dsh-fish',
     'dsh-fish-memory',
-    'dsh-fish-river',
-    'dsh-companion',
     'Character Card V2',
+    'dsh-companion',
     'Generative Agents',
-    'DUMA',
-    'persona_core',
     'DeepSeek Harness',
     '双鱼座',
     '所有养过鱼的人',
@@ -118,31 +115,33 @@ test('鸣谢页：十一个借鉴来源的名头与关键文案都在源码里�
   }
   // 隐藏项目不鸣谢。
   assert.ok(!SRC.includes('dsh-purge'), 'client.js 鸣谢页不该出现「dsh-purge」（隐藏项目不鸣谢）')
-  // 自己的前作不用谢。
-  assert.ok(!SRC.includes('dsh-whale-memory'), 'client.js 鸣谢页不该出现「dsh-whale-memory」（自己的前作不鸣谢）')
+  // 自己的前作不用谢：作者自己的插件一个都不列。
+  for (const word of ['dsh-whale-memory', 'dsh-memory-brain', 'dsh-school', 'dsh-slow-wave', 'dafeiyu_persona_core']) {
+    assert.ok(!SRC.includes(word), `client.js 不该出现「${word}」（用户自己的插件不鸣谢）`)
+  }
+  // 没实现的机制不列：流水层、DUMA/双流、语病注入。
+  assert.ok(!SRC.includes('dsh-fish-river'), 'client.js 不该出现「dsh-fish-river」（流水层没实现）')
+  assert.ok(!SRC.includes('DUMA'), 'client.js 不该出现「DUMA」（机制不符）')
   // 底部那行小字，指向反馈页的加群方式。
   assert.ok(SRC.includes('发反馈告诉我们'), '鸣谢页底部小字没写')
 })
 
-test('鸣谢十一条顺序固定：dsh-fish 排第一', () => {
+test('鸣谢八条顺序固定：dsh-fish 排第一', () => {
   const { mod } = loadBundle()
   assert.deepEqual(
     mod.THANKS.map((t) => t.name),
     [
       'dsh-fish',
       'dsh-fish-memory',
-      'dsh-fish-river',
-      'dsh-companion',
       'Character Card V2',
+      'dsh-companion',
       'Generative Agents',
-      'DUMA / 双流',
-      'dsh-fish-tone / persona_core',
       'DeepSeek Harness',
       '双鱼座性格的公开资料',
       '所有养过鱼的人',
     ],
   )
-  assert.equal(mod.THANKS.length, 11, '鸣谢应该正好十一条')
+  assert.equal(mod.THANKS.length, 8, '鸣谢应该正好八条')
 })
 
 test('源码没有禁止的词，也没有 range 输入', () => {
