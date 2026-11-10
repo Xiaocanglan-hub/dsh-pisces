@@ -257,20 +257,24 @@ test('点「鸣谢」页签：切到第六页，来源与底部小字都在', ()
   const text = renderNode(render(), []).join('\n')
   for (const word of [
     '鸣谢',
-    'DeepSeek Harness',
     'dsh-fish',
-    '双鱼座',
-    '所有养过鱼的人',
     'dsh-fish-memory',
     'Character Card V2',
+    'dsh-companion',
     'Generative Agents',
-    'persona_core',
+    'DeepSeek Harness',
+    '双鱼座',
+    '所有养过鱼的人',
   ]) {
     assert.ok(text.includes(word), `鸣谢页缺「${word}」`)
   }
-  assert.ok(text.includes('https://www.npmjs.com/package/dsh-fish'), '鸣谢页缺 dsh-fish 的 npm 链接')
+  assert.ok(text.includes('https://www.npmjs.com/package/@ssamurias/dsh-fish'), '鸣谢页缺 dsh-fish 的 npm 链接')
   assert.ok(!text.includes('dsh-purge'), 'dsh-purge 是隐藏项目，不该出现在鸣谢里')
-  assert.ok(!text.includes('dsh-whale-memory'), '自己的前作不用谢，不该出现在鸣谢里')
+  for (const word of ['dsh-whale-memory', 'dsh-memory-brain', 'dsh-school', 'dsh-slow-wave', 'dafeiyu_persona_core']) {
+    assert.ok(!text.includes(word), `用户自己的插件「${word}」不该出现在鸣谢里`)
+  }
+  assert.ok(!text.includes('dsh-fish-river'), '流水层没实现，不该出现在鸣谢里')
+  assert.ok(!text.includes('DUMA'), 'DUMA/双流的机制不符，不该出现在鸣谢里')
   assert.ok(!text.includes('晓晓'), '语音声线不进鸣谢')
   assert.ok(!text.includes('edge-tts'), '语音声线不进鸣谢')
   assert.ok(text.includes('发反馈告诉我们'), '底部小字「发反馈告诉我们」没渲染')
