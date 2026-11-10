@@ -228,7 +228,7 @@ test('Panel 首次渲染不抛，六个页签的文本真的在元素树里', ()
   for (const label of TAB_LABELS) {
     assert.ok(text.includes(label), `页签「${label}」没有渲染出来`)
   }
-  assert.ok(text.includes('鱼肥生双'), '标题「鱼肥生双」没有渲染出来')
+  assert.ok(text.includes('派希丝'), '标题「派希丝」没有渲染出来')
   // 首次渲染 snap=null、loading=true，应该至少有一句加载态/空状态的人话。
   assert.match(text, /读取中|正在读她的状态|还没有/, '首次渲染没有任何加载态或空状态文案')
 })
