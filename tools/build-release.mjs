@@ -24,7 +24,7 @@ const repoRoot = resolve(pkgRoot, '..', '..')
 const outRoot = join(repoRoot, 'dist', 'dsh-pisces')
 
 // 复制清单：文件 + 目录；其它一律不带。
-const FILES = ['index.js', 'client.js', 'cordis.patch.yml', 'README.md', 'THIRD-PARTY-NOTICES.md', 'package.json']
+const FILES = ['index.js', 'client.js', 'cordis.patch.yml', 'README.md', 'THIRD-PARTY-NOTICES.md', 'CHANGELOG.md', 'AGENTS.md', 'package.json']
 const DIRS = ['lib', 'assets']
 // 发布包里要删掉的文件（相对 outRoot）。
 const DROP = ['lib/devkey.js', 'persona-fixed.md']
@@ -118,4 +118,5 @@ console.log(`[build-release] 发布包：${outRoot}`)
 console.log(`[build-release] 版本：${pkg.version}  名字：${pkg.name}  release：true`)
 for (const f of manifest) console.log(`  ${fmtSize(f.size).padStart(8)}  ${f.path}`)
 console.log(`[build-release] 共 ${manifest.length} 个文件，合计 ${fmtSize(total)}`)
+
 
