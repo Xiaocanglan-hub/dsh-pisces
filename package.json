@@ -1,0 +1,54 @@
+{
+  "name": "dsh-pisces",
+  "version": "0.1.4",
+  "private": false,
+  "description": "鱼肥生双：一只会长大的本地小鱼（DSH 插件）。事件流记忆、渐进揭开、好感、新手引导；派希丝是养成目标。",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib",
+    "assets",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "plugin",
+    "companion",
+    "memory"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Xiaoclan-hub/dsh-pisces"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "slots"
+      ]
+    },
+    "compatibility": {
+      "dsh": ">=0.2.0-rc.1 <0.3.0-0"
+    },
+    "pisces": {
+      "release": false
+    }
+  },
+  "dependencies": {},
+  "peerDependencies": {},
+  "devDependencies": {}
+}
