@@ -894,15 +894,12 @@ window.__ModuleLoader__.load({
     // -------------------------------------------------------------------------
 
     const THANKS = [
-      // 应谢尽谢：dsh-fish 排第一；隐藏项目与作者前作不列。
-      { name: 'dsh-fish', what: '宿主骨架、四阶段门、叫醒只给处境；本项目从它的形态长出来。', href: 'https://www.npmjs.com/package/dsh-fish' },
-      { name: 'dsh-fish-memory', what: '记忆鲜活度与半衰期、中文双字组检索、命中才注入。' },
-      { name: 'dsh-fish-river', what: '三层记忆（成长 / 关系 / 流水）、群聊不污染人格。' },
+      // 2026-11-10 定稿：八条；用户自己的插件/前作不鸣谢，dsh-fish 排第一。
+      { name: 'dsh-fish', what: '事件流 + 纯函数派生 + 面板形态，本项目的骨架从它长出来。', href: 'https://www.npmjs.com/package/@ssamurias/dsh-fish' },
+      { name: 'dsh-fish-memory', what: '记忆鲜活度与半衰期、中文检索。' },
+      { name: 'Character Card V2', what: '`export.js` 的 CCv2 导出格式。' },
       { name: 'dsh-companion', what: '好感分档、关系产品化的样本。' },
-      { name: 'Character Card V2', what: '卡片格式兼容（CCv2 导出）。' },
-      { name: 'Generative Agents', what: 'memory stream + 定期 reflection。' },
-      { name: 'DUMA / 双流', what: '快慢两模型、冲突才二次调用。' },
-      { name: 'dsh-fish-tone / persona_core', what: '语病密度、单轮人格变化上限。' },
+      { name: 'Generative Agents', what: 'memory stream + 定期 reflection 的启发。' },
       { name: 'DeepSeek Harness', what: '宿主、插件体系、slots / systemPrompt / tools。' },
       { name: '双鱼座性格的公开资料', what: '（经 Exa 检索整理）她的性格起点。' },
       { name: '所有养过鱼的人', what: '社区里"把 AI 当室友养"的尝试。' },
