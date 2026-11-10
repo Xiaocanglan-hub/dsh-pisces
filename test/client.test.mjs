@@ -49,7 +49,7 @@ test('factory 返回的对象有 inject:["slots"]（n22 的坑）', () => {
   assert.equal(typeof mod.Panel, 'function')
 })
 
-test('apply 只注册一次 settings.section，标题是「鱼肥生双」', () => {
+test('apply 只注册一次 settings.section，标题是「派希丝」', () => {
   const { mod } = loadBundle()
   const effectLabels = []
   const injects = []
@@ -80,7 +80,7 @@ test('apply 只注册一次 settings.section，标题是「鱼肥生双」', () 
   assert.equal(registers[0].options.name, 'settings.section')
   assert.equal(registers[0].options.id, 'dsh-pisces')
   assert.equal(registers[0].options.order, 70)
-  assert.equal(registers[0].options.label(), '鱼肥生双')
+  assert.equal(registers[0].options.label(), '派希丝')
   assert.equal(registers[0].component, mod.Panel)
 
   // 宿主现行签名是 slots.inject + slots.register（参考文档 §1.3 / ui-settings 同形）。
