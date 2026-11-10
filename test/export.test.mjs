@@ -1,7 +1,7 @@
 // 导出（M12）：CCv2 卡、soul bundle 自证、旧包 legacy 放行、带 id 原样导入、day 0、幂等。
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -215,7 +215,12 @@ test('改一个事件 → verify 不过；import 拒收（清单对不上）且�
 
 // ---------------------------------------------------------------- 6. 旧包 legacy 放行
 
-test('旧包（diary 清单没有 count、指纹不对）→ legacy:[diary.md]，导入成功', async () => {
+test('旧包（diary 清单没有 count、指纹不对）→ legacy:[diary.md]，导入成功', async (t) => {
+  // 这个旧包是她的旧鱼真实导出，只在私有工作区里有；公开仓库不带她的数据，缺了就跳过。
+  if (!existsSync(OLD_BUNDLE)) {
+    t.skip('没有旧鱼导出样本（公开仓库不带她的数据）')
+    return
+  }
   const dst = await mkStore()
   const r = await importSoulBundle({ file: OLD_BUNDLE, store: dst.store, root: dst.root, now: NOW })
 

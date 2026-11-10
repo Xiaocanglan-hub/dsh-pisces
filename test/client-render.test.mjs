@@ -602,7 +602,6 @@ const SETTINGS_SCHEMA = [
     ],
     restart: true,
   },
-  { path: 'bili.qrLogin', kind: 'string', label: 'B 站登录状态', hint: '只读', readOnly: true, restart: false },
 ]
 
 const SETTINGS_DATA = {
@@ -613,7 +612,6 @@ const SETTINGS_DATA = {
     tools: { narrow: false, allow: 'hers' },
     dual: { mode: 'A' },
     panel: { affinity: true },
-    bili: { qrLogin: 'idle' },
   },
 }
 
@@ -630,15 +628,17 @@ function renderSettings() {
   return { tree, texts, text: texts.join('\n') }
 }
 
-test('设置页由 schema 渲染：工具收窄、保存设置、她的数据、B 站只读状态都在', () => {
+test('设置页由 schema 渲染：工具收窄、保存设置、她的数据、两张登录卡都在', () => {
   const { text } = renderSettings()
 
   assert.ok(text.includes('工具收窄'), 'schema 里的 bool 标签没渲染')
   assert.ok(text.includes('面板显示好感'), 'schema 里的第二项没渲染')
   assert.ok(text.includes('保存设置'), '保存按钮没渲染')
   assert.ok(text.includes('她的数据：C:\\data'), '数据根没显示')
-  assert.ok(text.includes('未登录'), 'B 站登录状态没显示')
-  assert.ok(text.includes('扫码登录（下一步接）'), '扫码登录占位按钮没显示')
+  assert.ok(text.includes('未登录'), '登录状态没显示')
+  assert.ok(text.includes('B 站'), 'B 站登录卡没渲染')
+  assert.ok(text.includes('百度贴吧'), '贴吧登录卡没渲染')
+  assert.ok(!text.includes('下一步接'), '不再留「下一步接」的占位文案')
 })
 
 test('schema 里 restart:true 的项带「保存后需重启」，restart:false 的不带', () => {
@@ -728,7 +728,46 @@ test('百度贴吧状态默认显示「未登录」，没有扫码/QQ/微信', (
   assert.ok(text.includes('登录状态：未登录'), '没登录时应显示「未登录」')
   assert.ok(!text.includes('扫码'), '贴吧不做扫码')
   assert.ok(!text.includes('微信'), '贴吧不接微信')
+  assert.equal(findButton(section, '用手机扫码登录'), null, '贴吧不做扫码')
   assert.ok(findButton(section, '保存并验证'), '保存并验证按钮应该是可点的 button')
+})
+
+// ---------------------------------------------------------------------------
+// B 站登录：只收 SESSDATA/bili_jct，粘贴 + 保存并验证；不再是扫码占位
+// ---------------------------------------------------------------------------
+
+function renderBiliCard() {
+  const { tree } = renderSettings()
+  const section = flatElements(tree).find(
+    (el) =>
+      el.type === 'section' &&
+      flatElements(el).some((c) => c.type === 'h3' && renderNode(c, []).join('') === 'B 站'),
+  )
+  assert.ok(section, '设置页应该有「B 站」卡')
+  return { section, text: renderNode(section, []).join('\n') }
+}
+
+test('设置页有 B 站登录入口：扫码按钮、textarea 占位、保存并验证、取 cookie 的说明都在', () => {
+  const { section, text } = renderBiliCard()
+
+  assert.ok(text.includes('保存并验证'), '保存按钮没渲染')
+  assert.ok(text.includes('F12'), '取 cookie 的说明没渲染')
+  assert.ok(text.includes('SESSDATA'), '说明里要写清取哪两个键')
+  assert.ok(text.includes('用手机扫码登录'), 'B 站该有扫码入口')
+  assert.ok(findButton(section, '用手机扫码登录'), '扫码登录应该是可点的 button')
+
+  const ta = flatElements(section).find((el) => el.type === 'textarea')
+  assert.ok(ta, '应该有一个 textarea')
+  assert.equal(ta.props.placeholder, '把浏览器的 SESSDATA=…; bili_jct=… 贴进来')
+})
+
+test('B 站状态默认显示「未登录」，扫码入口可点、不再有占位按钮', () => {
+  const { section, text } = renderBiliCard()
+
+  assert.ok(text.includes('登录状态：未登录'), '没登录时应显示「未登录」')
+  assert.ok(!text.includes('下一步接'), '不再留占位文案')
+  assert.ok(findButton(section, '保存并验证'), '保存并验证按钮应该是可点的 button')
+  assert.ok(findButton(section, '用手机扫码登录'), '扫码入口应该是可点的 button')
 })
 
 

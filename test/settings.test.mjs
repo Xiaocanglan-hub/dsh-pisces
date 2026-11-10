@@ -90,18 +90,17 @@ test('错误类型拒绝：bool 只收 true/false、enum 只收 options', () => 
   assert.equal(existsSync(settingsPath(root)), false)
 })
 
-test('bili.qrLogin 只读：写入被忽略并提示，磁盘上仍是 idle', () => {
+test('bili.qrLogin 已移除：登录态走 /bili，settings 里不再有这项', () => {
   const root = mkRoot()
   const r = writeSettings(root, { bili: { qrLogin: 'logged-in' } })
 
-  assert.equal(r.ok, true)
-  assert.deepEqual(r.changed, [])
-  assert.deepEqual(r.needsRestart, [])
-  assert.equal(r.settings.bili.qrLogin, 'idle')
-  assert.match(r.note, /只读/)
-  assert.equal(readSettings(root).bili.qrLogin, 'idle')
+  assert.equal(r.ok, false)
+  assert.match(r.reason, /没有这个设置项/)
+  assert.equal(Object.prototype.hasOwnProperty.call(readSettings(root).bili, 'qrLogin'), false)
+})
 
-  // persona.guard 是隐藏项：写入静默丢弃，不报错、不提示、磁盘上仍是默认 true。
+test('persona.guard 是隐藏项：写入静默丢弃，不报错、不提示、磁盘上仍是默认 true', () => {
+  const root = mkRoot()
   const guard = writeSettings(root, { persona: { guard: false } })
   assert.equal(guard.ok, true)
   assert.deepEqual(guard.changed, [])
@@ -128,7 +127,7 @@ test('mergeConfig：宿主 config 不被 settings/DEFAULTS 抹掉（逐键宿主
   assert.equal(m.persona.guard, false)
   assert.equal(m.persona.attach, true)
   assert.equal(m.bili.speak, false)
-  assert.equal(m.bili.qrLogin, 'idle')
+  assert.equal(Object.prototype.hasOwnProperty.call(m.bili, 'qrLogin'), false)
 
   assert.deepEqual(mergeConfig(null, null), DEFAULTS)
 })

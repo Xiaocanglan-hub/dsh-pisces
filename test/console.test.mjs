@@ -12,6 +12,7 @@ import { handle, page, readBody, registerConsole, toNodeHandler, ADULT_LABEL, PR
 import { SCHEMA, publicSettings, readSettings, writeSettings } from '../lib/settings.js'
 import { NICKNAME_MAX, nicknameOf, setNickname as writeNickname } from '../lib/nickname.js'
 import { BAIDU_FILE, TBS_API, USERINFO_API, loginBaidu, readBaidu } from '../lib/baidu.js'
+import { OWNER_FILE, loginBili, readBili } from '../lib/bili.js'
 
 const NOW = Date.parse('2026-11-09T12:00:00+08:00')
 const DAY = 86_400_000
@@ -1167,6 +1168,113 @@ test('/baidu：POST 用假 fetch 验证成功并写文件；失败回 400 且不
   const empty = await call('POST', '/baidu', {}, deps)
   assert.equal(empty.status, 400)
   assert.match(payload(empty).error, /cookie 是空的/)
+})
+
+
+// ---------------------------------------------------------------- B 站登录
+
+test('/bili：GET 只回 ok/loggedIn/name/hasCookie，绝不回 cookie；DELETE 清掉', async () => {
+  const res = await call('GET', '/bili', undefined, {
+    // 故意多塞一个 cookie，接口必须丢掉
+    biliStatus: async () => ({ ok: true, loggedIn: true, name: '小苍兰', hasCookie: true, cookie: 'SESSDATA=secret' }),
+  })
+  assert.equal(res.status, 200)
+  assertJsonHeaders(res)
+  const out = payload(res)
+  assert.deepEqual(Object.keys(out).sort(), ['hasCookie', 'loggedIn', 'name', 'ok'])
+  assert.equal(out.ok, true)
+  assert.equal(out.loggedIn, true)
+  assert.equal(out.name, '小苍兰')
+  assert.equal(out.hasCookie, true)
+  assert.equal(JSON.stringify(out).includes('SESSDATA'), false, '接口不能回 cookie')
+
+  // 没登录的形态
+  const idle = payload(await call('GET', '/bili', undefined, {
+    biliStatus: () => ({ ok: true, loggedIn: false, name: null, hasCookie: false }),
+  }))
+  assert.deepEqual(idle, { ok: true, loggedIn: false, name: null, hasCookie: false })
+
+  // 没装 dep → 503
+  const missing = await call('GET', '/bili')
+  assert.equal(missing.status, 503)
+  assert.equal(payload(missing).ok, false)
+
+  const cleared = await call('DELETE', '/bili', undefined, { biliLogout: () => ({ ok: true, removed: true }) })
+  assert.equal(cleared.status, 200)
+  assert.deepEqual(payload(cleared), { ok: true, loggedIn: false, name: null, hasCookie: false })
+})
+
+test('/bili：POST 用假 fetch 验证成功并写 owner.json；失败回 400 且不写', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pisces-console-bili-'))
+  const okFetch = async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return { code: 0, data: { isLogin: true, uname: '小苍兰', mid: 25237 } }
+    },
+  })
+  const deps = { biliLogin: (text) => loginBili({ root, text, fetchImpl: okFetch }) }
+
+  const ok = await call('POST', '/bili', { cookie: 'SESSDATA=sess; bili_jct=jct' }, deps)
+  assert.equal(ok.status, 200)
+  const body = payload(ok)
+  assert.deepEqual(body, { ok: true, loggedIn: true, name: '小苍兰', hasCookie: true })
+  assert.equal(readBili(root).name, '小苍兰')
+
+  const badRoot = mkdtempSync(path.join(tmpdir(), 'pisces-console-bili-'))
+  const badFetch = async () => ({ ok: true, status: 200, async json() { return { code: -101 } } })
+  const bad = await call('POST', '/bili', { cookie: 'SESSDATA=sess; bili_jct=jct' }, {
+    biliLogin: (text) => loginBili({ root: badRoot, text, fetchImpl: badFetch }),
+  })
+  assert.equal(bad.status, 400)
+  assert.equal(payload(bad).error, '没登录')
+  assert.equal(existsSync(path.join(badRoot, OWNER_FILE)), false)
+
+  const empty = await call('POST', '/bili', {}, deps)
+  assert.equal(empty.status, 400)
+  assert.match(payload(empty).error, /cookie 是空的/)
+})
+
+test('/bili/qr：POST 生成、GET 轮询、POST save、drop 都走通；失败回 502 / 409', async () => {
+  const deps = {
+    biliQrStart: () => ({ ok: true, key: 'k1', svg: '<svg/>', ttlMs: 180000, expiresAt: 1 }),
+    biliQrPoll: () => ({ state: 'confirmed', account: { mid: '42', name: '小鱼' }, why: '', note: '' }),
+    biliQrSave: () => ({ ok: true, name: '小鱼' }),
+    biliQrDrop: () => ({ ok: true }),
+  }
+
+  const start = await call('POST', '/bili/qr', {}, deps)
+  assert.equal(start.status, 200)
+  const s = payload(start)
+  assert.equal(s.ok, true)
+  assert.equal(s.key, 'k1')
+  assert.equal(s.svg, '<svg/>')
+  assert.equal(JSON.stringify(s).includes('cookie'), false, '生成码不该带 cookie 字段')
+
+  const poll = await call('GET', '/bili/qr?key=k1', undefined, deps)
+  assert.equal(poll.status, 200)
+  assert.equal(payload(poll).state, 'confirmed')
+  assert.deepEqual(payload(poll).account, { mid: '42', name: '小鱼' })
+
+  const saved = await call('POST', '/bili/qr/save', { key: 'k1' }, deps)
+  assert.equal(saved.status, 200)
+  assert.equal(payload(saved).name, '小鱼')
+
+  const dropped = await call('POST', '/bili/qr/drop', { key: 'k1' }, deps)
+  assert.equal(dropped.status, 200)
+
+  const noKey = await call('GET', '/bili/qr', undefined, deps)
+  assert.equal(noKey.status, 400)
+  assert.match(payload(noKey).error, /缺 key/)
+
+  const fail = await call('POST', '/bili/qr', {}, { biliQrStart: () => ({ ok: false, why: '连不上 B 站' }) })
+  assert.equal(fail.status, 502)
+  assert.equal(payload(fail).error, '连不上 B 站')
+
+  const notReady = await call('POST', '/bili/qr/save', { key: 'k2' }, {
+    biliQrSave: () => ({ ok: false, why: '还没扫码确认' }),
+  })
+  assert.equal(notReady.status, 409)
 })
 
 

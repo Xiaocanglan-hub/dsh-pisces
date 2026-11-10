@@ -52,7 +52,8 @@ import { nicknameOf, setNickname as writeNickname } from './lib/nickname.js'
 import { clearFixedOverride, readFixedOverride, writeFixedOverride } from './lib/personafile.js'
 import { ensureHomeWithRetry, HOME_FILE } from './lib/home.js'
 import { SCHEMA as SETTINGS_SCHEMA, mergeConfig, publicSettings, readSettings, writeSettings } from './lib/settings.js'
-import { hot } from './lib/bili.js'
+import { clearBili, hot, loginBili, readBili } from './lib/bili.js'
+import { createQrLogin } from './lib/biliqr.js'
 import { clearBaidu, loginBaidu, readBaidu } from './lib/baidu.js'
 import { speak as speakOnBili } from './lib/speak.js'
 import { guideFor as teachFor } from './lib/teach.js'
@@ -234,6 +235,9 @@ export function apply(ctx, config = {}) {
   }
   if (voiceAdapter?.ok) log(`语音回复：已接 ${voiceAdapter.kind}`)
   else log('语音回复：未接适配器（休眠）')
+
+  // B 站扫码登录：key 与 cookie 只活在内存里，停用时清掉（不落盘、不进日志）。
+  const qrLogin = createQrLogin({ log })
 
   let closed = false
   let disposed = false
@@ -659,7 +663,7 @@ export function apply(ctx, config = {}) {
    * 失败只回 {ok:false, reason}、只 log 一行，不阻塞启动（宿主没有 workspaceRegistry 也照跑）。
    */
   async function ensureHomeOnce() {
-    if (cfg.home?.enabled === false) return { ok: false, reason: '家没开（config.home.enabled=false）' }
+    if (cfg.home?.enabled === false || cfg.home?.auto === false) return { ok: false, reason: '家没开（config.home.enabled=false 或 home.auto=false）' }
     let fish = null
     try {
       const s = await live()
@@ -1144,6 +1148,42 @@ export function apply(ctx, config = {}) {
     return { ok: true, removed: clearBaidu(root) }
   }
 
+  /** B 站登录状态：只读本地 owner.json（保存时已经验过一次，不每次开面板都联网）。 */
+  async function biliStatus() {
+    const saved = readBili(root)
+    if (!saved) return { ok: true, loggedIn: false, name: null, hasCookie: false }
+    return { ok: true, loggedIn: true, name: saved.name || null, hasCookie: true }
+  }
+
+  /** B 站登录：粘贴 SESSDATA/bili_jct → 验证 → 落盘；失败原因由 lib/bili.js 给，不打印 cookie。 */
+  function biliLogin(text) {
+    return loginBili({ root, text, log })
+  }
+
+  function biliLogout() {
+    return { ok: true, removed: clearBili(root) }
+  }
+
+  /**
+   * B 站扫码登录：生成码 → 轮询 → （人点保存）才落盘。
+   * 四个动作都在 lib/biliqr.js 的状态机里；这里只把 root 和库边界接上。
+   */
+  function biliQrStart() {
+    return qrLogin.start()
+  }
+
+  function biliQrPoll(key) {
+    return qrLogin.poll(key)
+  }
+
+  async function biliQrSave(key) {
+    return qrLogin.save(key, root)
+  }
+
+  function biliQrDrop(key) {
+    return qrLogin.drop(key)
+  }
+
   /**
    * 语音回复状态：只回有没有适配器、是哪种。
    * available 同时受隐藏开关约束；没有适配器时恒为 false（宿主现在就是这样）。
@@ -1177,6 +1217,13 @@ export function apply(ctx, config = {}) {
     baiduStatus,
     baiduLogin,
     baiduLogout,
+    biliStatus,
+    biliLogin,
+    biliLogout,
+    biliQrStart,
+    biliQrPoll,
+    biliQrSave,
+    biliQrDrop,
     // 语音回复：状态 + 条件触发。不进面板；未来桥只调 voiceReply。
     voice: voiceInfo,
     voiceReply,
@@ -1422,8 +1469,18 @@ export function apply(ctx, config = {}) {
   //      读不到 home.json 就跳过这条判据，不影响启动。
   // 两条都不满足 → 不挂。
   if (cfg.attachToAgents !== false) {
-    const herHome = join(root, 'home')
     const homeFile = join(root, HOME_FILE)
+    /** 家目录：home.json 的 workspacePath 优先（搬家后 living 就是她家）；没有就退回 <root>/home。 */
+    const readHomeWorkspace = () => {
+      try {
+        const raw = readFileSync(homeFile, 'utf8').replace(/^\uFEFF/, '')
+        const j = JSON.parse(raw)
+        return String(j?.workspacePath ?? j?.cwd ?? '')
+      } catch {
+        return ''
+      }
+    }
+    const herHome = readHomeWorkspace() || join(root, 'home')
     /** 每次现读：home.json 可能在插件启动之后才由 ensureHome 写出来。 */
     const readHomeSessionId = () => {
       try {
@@ -1494,7 +1551,16 @@ export function apply(ctx, config = {}) {
         // 聊天落库的门控：llm/stream 是全局 waterfall，别的会话的生成也会经过观察器。
         // 只有她家里那条会话（home.json 的 sessionId）才记 heard/utterance；每次现读，
         // 读不到 home.json → false。shouldAttach 只管挂人设段，不决定记不记事件。
-        isHerSession: (sid) => Boolean(sid) && sid === readHomeSessionId(),
+        isHerSession: (sid, key) => {
+          if (sid && sid === readHomeSessionId()) return true
+          // 宿主没给 sessionId 时 attach 会退回 cwd 当会话 key：家目录（living）下的会话也算她屋里。
+          if (key && String(key).startsWith('cwd:')) {
+            const cwd = flatPath(String(key).slice(4))
+            const home = flatPath(herHome)
+            if (cwd && home && (cwd === home || cwd.startsWith(`${home}/`))) return true
+          }
+          return false
+        },
         config: cfg,
         log,
       })
@@ -1561,6 +1627,15 @@ export function apply(ctx, config = {}) {
       baiduStatus: () => service.baiduStatus(),
       baiduLogin: (text) => service.baiduLogin(text),
       baiduLogout: () => service.baiduLogout(),
+      // B 站登录：GET /bili 只回状态（绝不回 cookie），POST 粘贴验证，DELETE 清掉。
+      biliStatus: () => service.biliStatus(),
+      biliLogin: (text) => service.biliLogin(text),
+      biliLogout: () => service.biliLogout(),
+      // 扫码登录：POST /bili/qr 生成，GET ?key= 轮询，POST /bili/qr/save 保存，drop 取消。
+      biliQrStart: () => service.biliQrStart(),
+      biliQrPoll: (key) => service.biliQrPoll(key),
+      biliQrSave: (key) => service.biliQrSave(key),
+      biliQrDrop: (key) => service.biliQrDrop(key),
       readStore: () => ensureLive(),
       seed: service.seed,
       writeSeed: service.writeSeed,
@@ -1689,7 +1764,7 @@ export function apply(ctx, config = {}) {
   // 11. 家：已经领养/写过起点的话，在宿主侧栏里建一个工作区 + 一条会话（幂等）。
   // 只在事件流里有 demo 或 seed 时才建；config.home.enabled === false 时整块跳过。
   // 失败只 log 一行，不阻塞启动——宿主没有这些服务时插件照样跑。
-  if (cfg.home?.enabled !== false) {
+  if (cfg.home?.enabled !== false && cfg.home?.auto !== false) {
     ready.then((s) => {
       if (!s) return
       try {
@@ -1725,6 +1800,12 @@ export function apply(ctx, config = {}) {
     const first = !disposed
     disposed = true
     closed = true
+    // 内存里可能还攥着扫码登录的 cookie：停用就清掉，不靠进程退出兜底。
+    try {
+      qrLogin.clear()
+    } catch {
+      /* 清不掉就算了 */
+    }
     if (first) {
       log(`已停用（apply#${n}）`)
     }

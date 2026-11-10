@@ -533,8 +533,6 @@ window.__ModuleLoader__.load({
           h('p', { className: data ? 'err' : 'empty' }, data ? `设置没读到：${data.settingsError}` : '正在读设置…'))
       }
 
-      const bili = cur.bili || {}
-      const logged = bili.qrLogin === 'logged-in'
       const set = (path, value) => setDraft((d) => ({ ...d, [path]: value }))
 
       async function save() {
@@ -597,27 +595,43 @@ window.__ModuleLoader__.load({
           h('div', { className: 'row' }, h('button', { type: 'button', disabled: busy, onClick: save }, '保存设置')),
           note ? h('p', { className: note === '存好了，重启后生效' ? 'hint' : 'err' }, note) : null,
         ),
-        h(Card, { title: 'B 站', right: '只读' },
-          h('p', { className: 'hint' }, `登录状态：${logged ? '已登录 _小苍兰_' : '未登录'}`),
-          h('div', { className: 'row' }, h('button', { type: 'button', disabled: true }, '扫码登录（下一步接）'))),
+        h(BiliCard, null),
         h(BaiduCard, null),
       )
     }
 
-    // 百度贴吧登录：粘贴 BDUSS/STOKEN → 后端验证 → 状态就地刷新；不做扫码/QQ/微信。
-    function BaiduCard() {
+    // 登录卡（B 站 / 百度贴吧共用）：扫码或粘贴 cookie → 后端验证 → 状态就地刷新。
+    // B 站那张多给一条扫码路：二维码由宿主现画（lib/qr.js），页面只拿 SVG 和「登的是谁」。
+    function CookieCard({ title, api, placeholder, hint, qr }) {
       const [status, setStatus] = useState(null)
       const [text, setText] = useState('')
       const [busy, setBusy] = useState(false)
       const [note, setNote] = useState('')
+      const [q, setQ] = useState(null)
 
       useEffect(() => {
         let alive = true
-        getJson('/baidu')
+        getJson(api)
           .then((d) => { if (alive) setStatus(d) })
           .catch(() => { if (alive) setStatus({ loggedIn: false }) })
         return () => { alive = false }
-      }, [])
+      }, [api])
+
+      const key = q && q.key ? String(q.key) : ''
+      const state = q && q.state ? String(q.state) : ''
+      const polling = Boolean(key) && (state === 'waiting' || state === 'scanned')
+
+      // 轮询只在这一张码还活着的时候跑；状态变了（confirmed/expired）就停。
+      useEffect(() => {
+        if (!polling) return undefined
+        let alive = true
+        const timer = setInterval(() => {
+          getJson(`${api}/qr?key=${encodeURIComponent(key)}`)
+            .then((r) => { if (alive) setQ((prev) => (prev && prev.key === key ? { ...prev, ...r } : prev)) })
+            .catch(() => {})
+        }, 1200)
+        return () => { alive = false; clearInterval(timer) }
+      }, [api, key, polling])
 
       const logged = !!(status && status.loggedIn)
       const name = status && status.name ? String(status.name) : ''
@@ -627,7 +641,7 @@ window.__ModuleLoader__.load({
         setBusy(true)
         setNote('')
         try {
-          const r = await postJson('/baidu', { cookie: text })
+          const r = await postJson(api, { cookie: text })
           setStatus(r)
           setText('')
           setNote(r.name ? `登上了：${r.name}` : '登上了')
@@ -638,20 +652,102 @@ window.__ModuleLoader__.load({
         }
       }
 
+      async function startQr() {
+        if (busy) return
+        setBusy(true)
+        setNote('')
+        try {
+          setQ({ ...(await postJson(`${api}/qr`, {})), state: 'waiting' })
+        } catch (e) {
+          setNote(String((e && e.message) || e))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      async function saveQr() {
+        if (busy || !key) return
+        setBusy(true)
+        try {
+          const r = await postJson(`${api}/qr/save`, { key })
+          setStatus(r)
+          setQ(null)
+          setNote(r.name ? `登上了：${r.name}` : '登上了')
+        } catch (e) {
+          setNote(String((e && e.message) || e))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      function dropQr() {
+        const k = key
+        setQ(null)
+        if (k) postJson(`${api}/qr/drop`, { key: k }).catch(() => {})
+      }
+
+      const qrLine = !q
+        ? ''
+        : state === 'confirmed'
+          ? (q.account && q.account.name
+            ? `登的是 ${q.account.name}${q.account.mid ? `（uid ${q.account.mid}）` : ''}`
+            : '扫码成功，认不出是哪个号')
+          : state === 'scanned'
+            ? '扫到了，在手机上点一下「确认登录」'
+            : state === 'expired'
+              ? '二维码过期了，点「换一张」'
+              : (q.why || '用手机 B 站扫一下')
+
       return h(
         Card,
-        { title: '百度贴吧', right: 'Cookie' },
+        { title, right: 'Cookie' },
         h('p', { className: 'hint' }, `登录状态：${logged ? (name ? `已登录 ${name}` : '已登录') : '未登录'}`),
+        qr ? h('div', { className: 'row' }, h('button', { type: 'button', disabled: busy, onClick: startQr }, q ? '换一张' : '用手机扫码登录')) : null,
+        q ? h('div', { className: 'qr' },
+          q.svg ? h('img', {
+            className: 'qrimg',
+            src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(String(q.svg))}`,
+            alt: '登录二维码',
+            width: 180,
+            height: 180,
+          }) : null,
+          h('p', { className: 'hint' }, qrLine),
+          h('div', { className: 'row' },
+            state === 'confirmed' ? h('button', { type: 'button', disabled: busy, onClick: saveQr }, '就是这个号，保存') : null,
+            h('button', { type: 'button', onClick: dropQr }, '收起'),
+          ),
+        ) : null,
         h('textarea', {
           value: text,
           rows: 3,
-          placeholder: '把浏览器的 BDUSS=…; STOKEN=… 贴进来',
+          placeholder,
           onChange: (e) => setText(e.target.value),
         }),
         h('div', { className: 'row' }, h('button', { type: 'button', disabled: busy, onClick: save }, '保存并验证')),
         note ? h('p', { className: note.startsWith('登上了') ? 'hint' : 'err' }, note) : null,
-        h('p', { className: 'hint' }, '浏览器 F12 → Application → Cookies → tieba.baidu.com → 复制 BDUSS 和 STOKEN'),
+        h('p', { className: 'hint' }, hint),
       )
+    }
+
+    // B 站登录：手机扫码为主，粘贴 SESSDATA/bili_jct 是退路；登录态落 owner.json。
+    function BiliCard() {
+      return h(CookieCard, {
+        title: 'B 站',
+        api: '/bili',
+        qr: true,
+        placeholder: '把浏览器的 SESSDATA=…; bili_jct=… 贴进来',
+        hint: '不想扫码：浏览器 F12 → Application → Cookies → bilibili.com → 复制 SESSDATA 和 bili_jct',
+      })
+    }
+
+    // 百度贴吧登录：粘贴 BDUSS/STOKEN；只影响贴吧，不碰 B 站。
+    function BaiduCard() {
+      return h(CookieCard, {
+        title: '百度贴吧',
+        api: '/baidu',
+        placeholder: '把浏览器的 BDUSS=…; STOKEN=… 贴进来',
+        hint: '浏览器 F12 → Application → Cookies → tieba.baidu.com → 复制 BDUSS 和 STOKEN',
+      })
     }
 
     // -------------------------------------------------------------------------
