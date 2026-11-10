@@ -72,13 +72,54 @@ test('band 翻转：要过 30 天冷却，还要 ≥2 条 refs；否则不写 mo
   assert.ok(m.describe().shifts >= 1, '过冷却 + 两条证据应该写一条 mode_shift')
 })
 
-test('模仿风险：连续 20 条没有分歧才亮；出现一条 divergence 就重置', () => {
+test('模仿风险：连续 20 条没有分歧、且看不出他偏哪边才亮；出现 divergence 就重置', () => {
   const m = mind()
-  foldN(m, 19, 'd')
+  // 一半 d 一半 i：userDom 在 0.5 附近，但 n 还没到 20 → 不亮。
+  for (let i = 0; i < 9; i++) {
+    m.fold({ seq: i * 2 + 1, label: 'd' })
+    m.fold({ seq: i * 2 + 2, label: 'i' })
+  }
   assert.equal(m.describe().mimicryRisk, false)
-  foldN(m, 1, 'd')
+  m.fold({ seq: 19, label: 'd' })
+  m.fold({ seq: 20, label: 'i' })
   assert.equal(m.describe().mimicryRisk, true)
   m.fold({ seq: 21, label: 'i', why: 'divergence:像是他说的' })
+  assert.equal(m.describe().mimicryRisk, false)
+})
+
+test('userDom：没有归因时是 null，不是 0；mimicryRisk 跟着 false', () => {
+  const m = mind()
+  assert.equal(m.describe().userDom, null)
+  assert.equal(m.describe().mimicryRisk, false)
+  assert.equal(m.state.userDom, null)
+
+  // 全是 null（纯描述）也不算"判得出主导度"。
+  foldN(m, 20, 'null')
+  assert.equal(m.describe().userDom, null)
+  assert.equal(m.describe().mimicryRisk, false)
+})
+
+test('userDom：最近 20 条全是 d → 接近 1，mimicryRisk 是 false', () => {
+  const m = mind()
+  foldN(m, 25, 'd')
+  assert.equal(m.describe().userDom, 1)
+  assert.equal(m.describe().mimicryRisk, false)
+})
+
+test('userDom：最近 20 条 d/i 各半 → 0.5，mimicryRisk 是 true', () => {
+  const m = mind()
+  for (let i = 0; i < 10; i++) {
+    m.fold({ seq: i * 2 + 1, label: 'd' })
+    m.fold({ seq: i * 2 + 2, label: 'i' })
+  }
+  assert.equal(m.describe().userDom, 0.5)
+  assert.equal(m.describe().mimicryRisk, true)
+})
+
+test('老 bug 回归：归因 ≥20 条、最近 20 条全是 i（温和）时 mimicryRisk 不再恒 true', () => {
+  const m = mind()
+  foldN(m, 30, 'i')
+  assert.equal(m.describe().userDom, 0)
   assert.equal(m.describe().mimicryRisk, false)
 })
 
