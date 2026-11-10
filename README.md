@@ -1,4 +1,4 @@
-# 鱼肥生双（dsh-pisces）
+﻿# 鱼肥生双（dsh-pisces）
 
 一只会长大的本地小鱼，DSH 插件。事件流记忆、渐进揭开、好感、新手引导；派希丝是养成目标。
 
@@ -38,7 +38,7 @@ dsh plugin add dsh-pisces
 
 ## 鸣谢
 
-这些是**思路借鉴**，不是代码依赖；每个项目的代码各自独立，本仓库没有复制它们的实现。
+这些是**思路借鉴**，不是代码依赖；每个项目的代码各自独立，本仓库没有复制它们的实现。完整的来源说明见 [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md)。
 
 - **dsh-fish** —— 事件流 + 纯函数派生 + 面板形态，本项目的骨架从它长出来。npm：<https://www.npmjs.com/package/@ssamurias/dsh-fish>
 - **dsh-fish-memory** —— 记忆鲜活度与半衰期、中文检索。
@@ -50,3 +50,4 @@ dsh plugin add dsh-pisces
 - **所有养过鱼的人** —— 社区里"把 AI 当室友养"的尝试。
 
 如果你觉得某个想法该被写在这里，发反馈告诉我们（反馈页有加群方式）。
+
