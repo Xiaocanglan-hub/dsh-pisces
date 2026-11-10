@@ -1,6 +1,6 @@
 {
   "name": "dsh-pisces",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": false,
   "description": "鱼肥生双：一只会长大的本地小鱼（DSH 插件）。事件流记忆、渐进揭开、好感、新手引导；派希丝是养成目标。",
   "type": "module",
@@ -29,7 +29,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/Xiaoclan-hub/dsh-pisces"
+    "url": "https://github.com/Xiaocanglan-hub/dsh-pisces.git"
   },
   "dsh": {
     "bundle": {
@@ -50,5 +50,9 @@
   },
   "dependencies": {},
   "peerDependencies": {},
-  "devDependencies": {}
+  "devDependencies": {},
+  "homepage": "https://github.com/Xiaocanglan-hub/dsh-pisces#readme",
+  "bugs": {
+    "url": "https://github.com/Xiaocanglan-hub/dsh-pisces/issues"
+  }
 }
