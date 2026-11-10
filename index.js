@@ -1,0 +1,1763 @@
+// dsh-pisces-core：把 lib/ 里的东西装配成一个 DSH 插件。
+//
+// 装配口径（知识库 n5 / n28 / n42，README 的「在真实宿主里验证」「工具面」「观测台」）：
+// 1. 启动期宿主可能先 dispose 一次，所以 createStore 完成后必须检查 closed；关了就回收
+//    store、释放锁、ready 解析成 null。
+// 2. ready 一旦是 null 就永久是 null；工具面/服务不能把它钉死。所有服务方法都走 live()，
+//    没有库就 ensureLive() 按需重开——停用之后观测台和工具照样能用。
+// 3. 工具面放在 ready.then 里注册：演示标记要等库打开才知道；getStore 必须给 live()。
+// 4. 观测台的 deps 里，seed/writeSeed/adopt/learn/verify 是 service 方法本身（闭包持库），
+//    不是 lib 函数；store/mind/nightly/dual 用 getter，宿主重开库后不读旧实例。
+//
+// 成年鱼（n26/n44）：判据只看事件流里 `meta.kind:'demo'`，不看配置；领养成功后重置分流缓存，
+// 工具面在注册时读一次事件流决定是否多挂 pisces_self / pisces_teach / pisces_guide / pisces_check；
+// 提示词桥的 buildSections 也要先判 demo 再传进去，否则普通鱼也会挂 pisces:fixed。
+import { join } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { resolveRoot, paths, ensureDirs } from './lib/paths.js'
+import { acquire, release } from './lib/lock.js'
+import { createStore } from './lib/store.js'
+import { createMind } from './lib/split.js'
+import { deriveSelf } from './lib/derive.js'
+import { computeAffinity, maskAffinity } from './lib/affinity.js'
+import { computeReveal } from './lib/reveal.js'
+import { attachToAgents } from './lib/attach.js'
+import { attachDual } from './lib/dual.js'
+import { buildDevState, buildTrace, registerTools } from './lib/tools.js'
+import { devWriteSelf, patchCard, readCard, tamperCheck } from './lib/card.js'
+import {
+  BIASES,
+  MAX_FRAGMENTS,
+  MAX_FRAGMENT,
+  MAX_TOTAL,
+  biasOf,
+  initialDominance,
+  seedOf,
+  writeSeed as writeSeedToStore,
+} from './lib/seed.js'
+import { search } from './lib/search.js'
+import { listQuestions, setQuestionStatus } from './lib/questions.js'
+import { verifyDreams } from './lib/verify.js'
+import { learn as learnFromStore } from './lib/learn.js'
+import { importBrain, worldSummary, worldThreads } from './lib/world.js'
+import { createNightly } from './lib/nightly.js'
+import { importFishEvents, importFishRoot } from './lib/import.js'
+import { exportCardV2, exportSoulBundle, importSoulBundle } from './lib/export.js'
+import { PREFIX as CONSOLE_PREFIX, ADULT_LABEL, ADULT_NAME, registerConsole } from './lib/console.js'
+import { createLocalModel, probeLocalModel } from './lib/ollama.js'
+import { buildSections, devOverlayOf, FIXED_PERSONA } from './lib/persona.js'
+import { scan } from './lib/guard.js'
+import { adoptAdult, demoLabel, demoName, isDemo } from './lib/adopt.js'
+import { nicknameOf, setNickname as writeNickname } from './lib/nickname.js'
+import { clearFixedOverride, readFixedOverride, writeFixedOverride } from './lib/personafile.js'
+import { ensureHomeWithRetry, HOME_FILE } from './lib/home.js'
+import { SCHEMA as SETTINGS_SCHEMA, mergeConfig, publicSettings, readSettings, writeSettings } from './lib/settings.js'
+import { hot } from './lib/bili.js'
+import { clearBaidu, loginBaidu, readBaidu } from './lib/baidu.js'
+import { speak as speakOnBili } from './lib/speak.js'
+import { guideFor as teachFor } from './lib/teach.js'
+import * as guide from './lib/guide.js'
+import { dayOf } from './lib/util.js'
+import { VOICE_DIR, detectAdapter, loadVoiceConfig, shouldReplyWithVoice, synthesizeToFile } from './lib/voice.js'
+
+export const name = 'dsh-pisces-core'
+export const inject = ['tools']
+
+/**
+ * 发布标记：读 package.json 的 `dsh.pisces.release === true`。
+ * 缺文件、坏 JSON、没有这个字段都当开发版（false）——发布包由 tools/build-release.mjs 改写。
+ * @param {string} [file] package.json 路径；测试可以传临时文件。
+ */
+export function readRelease(file = join(import.meta.dirname, 'package.json')) {
+  try {
+    const raw = readFileSync(file, 'utf8').replace(/^\uFEFF/, '')
+    const pkg = JSON.parse(raw)
+    return pkg?.dsh?.pisces?.release === true
+  } catch {
+    return false
+  }
+}
+
+const LOG_PREFIX = '[dsh-pisces-core]'
+const NIGHTLY_TICK_MS = 10 * 60 * 1000
+// 体检的「很久」：超过七天没整理、或一个问题悬了七天，都算该看一眼。
+const CHECK_STALE_MS = 7 * 86_400_000
+const RECENT_TYPES = ['utterance', 'revise', 'reunion', 'narration', 'refusal', 'answer', 'dream_sim']
+
+// 成年鱼样本随包走；路径从本文件算，不依赖宿主的 cwd。
+const ADULT_FILE = join(import.meta.dirname, 'assets', 'adult-fish.soul.json')
+
+let applyCount = 0
+
+const errText = (err) => String(err?.message ?? err ?? '未知错误')
+
+function upperOf(v) {
+  return String(v ?? '').toUpperCase()
+}
+
+/** 从参数里取正文：服务方法同时接受字符串和 { text } 两种形状。 */
+function textOf(input) {
+  if (typeof input === 'string') return input
+  return typeof input?.text === 'string' ? input.text : ''
+}
+
+function optionsOf(input) {
+  return input && typeof input === 'object' ? input : {}
+}
+
+/**
+ * 路径归一：反斜杠、尾斜杠、Windows 大小写都抹平（照 dsh-fish 的 `flatPath`）。
+ * 只用来比「这条会话的 cwd 是不是在她屋里」，不拿它去开文件。
+ */
+function flatPath(p) {
+  const s = String(p ?? '').split(String.fromCharCode(92)).join('/')
+  return (s.endsWith('/') ? s.slice(0, -1) : s).toLowerCase()
+}
+
+/** 会话 cwd：字段回退顺序照 dsh-fish 的 `restrict.cwdOf`（真机核实过的形状）。 */
+function cwdOf(agent) {
+  return (
+    agent?.session?.header?.cwd ??
+    agent?.header?.cwd ??
+    agent?.session?.cwd ??
+    ''
+  )
+}
+
+/** 会话 id：`agent/created` 的负载里两处都见过，取到哪个算哪个。 */
+function sidOf(agent) {
+  return String(agent?.session?.header?.id ?? agent?.session?.id ?? '')
+}
+
+/**
+ * 插件入口。任何一步失败都只写日志，不让整个插件挂掉。
+ * @returns {() => void} dispose；可重复调用。
+ */
+export function apply(ctx, config = {}) {
+  const n = ++applyCount
+  // 宿主 config 是逃生口，优先于 settings；没有 settings.json 时 settings 就是 DEFAULTS。
+  const hostConfig = config && typeof config === 'object' ? config : {}
+  let cfg = hostConfig
+  const log = (...args) => {
+    try {
+      console.log(LOG_PREFIX, ...args)
+    } catch {
+      /* 日志失败不影响插件 */
+    }
+  }
+  const safeCtx = ctx && typeof ctx === 'object' ? ctx : {}
+
+  log(`apply#${n} 开始`)
+
+  let root
+  let p
+  try {
+    root = resolveRoot()
+    p = ensureDirs(root)
+    // 设置中心：只在这里读一次；面板保存后要重启才生效（与 SCHEMA.restart 对齐）。
+    cfg = mergeConfig(hostConfig, readSettings(root))
+  } catch (e) {
+    log(`启动失败：目录准备不了（${errText(e)}）`)
+    return () => {}
+  }
+
+  // 单实例锁：拿不到也只读继续，不因为另一个实例在写就让插件不加载。
+  let lockToken = null
+  try {
+    const got = acquire(p.lockFile)
+    if (got?.ok) {
+      lockToken = got.token
+    } else {
+      const who = got?.holder?.pid != null ? `pid ${got.holder.pid}` : '另一个实例'
+      log(`另一个实例在写（${who}），这个实例只读`)
+    }
+  } catch (e) {
+    log(`拿锁失败：${errText(e)}（继续，只读）`)
+  }
+
+  // 发布标记：dist/package.json 的 dsh.pisces.release === true。开发版默认 false。
+  // 测试可以用 hostConfig.release=true 模拟发布包，不用改真实 package.json。
+  const isRelease = readRelease() || hostConfig.release === true
+
+  // 开发者钥匙：只在开发版加载。发布包里 lib/devkey.js 已被删掉，所以必须动态 import + try，
+  // 不能让静态 import 把整个插件拖挂（n65/n74）。
+  let devkeyMod = null
+  let devkeyReady = null
+  if (!isRelease) {
+    devkeyReady = import('./lib/devkey.js')
+      .then((m) => {
+        devkeyMod = m
+        try {
+          const dk = m.ensureDevkey(root)
+          if (dk?.created) log('开发者钥匙已生成（只显示一次，丢了就重置）')
+        } catch (e) {
+          log(`开发者钥匙没生成：${errText(e)}`)
+        }
+        return m
+      })
+      .catch((e) => {
+        log(`开发者钥匙模块没加载：${errText(e)}`)
+        return null
+      })
+  } else {
+    log('发布版：开发者钥匙已移除')
+  }
+
+  /** 等钥匙模块加载完（开发版）；发布版 / 加载失败返回 null。 */
+  async function waitDevkey() {
+    if (devkeyReady) {
+      try {
+        await devkeyReady
+      } catch {
+        /* 加载失败的 log 在 catch 里已经打过 */
+      }
+    }
+    return devkeyMod
+  }
+
+  // 语音回复：条件触发、默认休眠。没接适配器就只记一行，不打扰任何人。
+  // 开关藏在 settings 的 voice.enabled（不进 SCHEMA）与 voice.json 的 enabled 里；
+  // 现在宿主没有 TTS 服务、也没配命令，所以这里必然走「未接适配器（休眠）」。
+  let voiceAdapter = null
+  let voiceEnabled = cfg.voice !== false && cfg.voice?.enabled !== false
+  let voiceFormat = 'mp3'
+  try {
+    const vc = loadVoiceConfig(root)
+    if (vc?.enabled === false) voiceEnabled = false
+    if (vc?.format) voiceFormat = vc.format
+    const detected = detectAdapter({ ctx: safeCtx, root })
+    voiceAdapter = detected?.ok === true ? detected : null
+  } catch (e) {
+    // 不再静默：真机上 ctx 探测抛错会被这里吞掉，看起来就像「没有适配器」。
+    voiceAdapter = null
+    log(`语音回复：探测出错（${errText(e)}）`)
+  }
+  if (voiceAdapter?.ok) log(`语音回复：已接 ${voiceAdapter.kind}`)
+  else log('语音回复：未接适配器（休眠）')
+
+  let closed = false
+  let disposed = false
+  let store = null
+  let opening = null
+  let mindInst = null
+  let nightlyInst = null
+  let nightlyModel = null
+  let nightlyProbed = false
+  let nightlyTimer = null
+  let attachOff = null
+  let dualOff = null
+  let consoleMount = null
+  let consoleInjectOff = null
+  let consolePollTimer = null
+  let consolePollCount = 0
+
+  function releaseLock() {
+    if (!lockToken) return
+    try {
+      release(p.lockFile, lockToken)
+    } catch {
+      /* 锁过期/被接管都算释放过了 */
+    }
+    lockToken = null
+  }
+
+  /** 按需重开库：停用之后也允许（n28）。不抢锁，只读/临时写。 */
+  async function ensureLive() {
+    if (store && (typeof store.isOpen !== 'function' || store.isOpen())) return store
+    if (opening) return opening
+    opening = (async () => {
+      try {
+        mindInst = null
+        nightlyInst = null
+        const s = await createStore({ root, forceJsonl: Boolean(cfg.jsonl), log })
+        store = s
+        try {
+          mindInst = createMind({
+            store: s,
+            log,
+            config: cfg.mind || {},
+            startDominance: initialDominance(s.readAll()),
+          })
+        } catch (e) {
+          log(`分流初始化失败：${errText(e)}`)
+        }
+        log(`按需开库：${root}（${s.backend || 'sqlite'}，${s.count()} 条事件）`)
+        return s
+      } catch (e) {
+        log(`按需开库失败：${errText(e)}`)
+        return null
+      } finally {
+        opening = null
+      }
+    })()
+    return opening
+  }
+
+  // ready 可能是 null（启动期被停用），也可能是一个已经被 dispose 关掉的库；
+  // 两种都走 ensureLive()，服务方法才不会拿着关掉的 store 去读写。
+  const live = async () => {
+    const s = await ready
+    if (s && (typeof s.isOpen !== 'function' || s.isOpen())) return s
+    return ensureLive()
+  }
+
+  // 启动：createStore 之后先看 closed，停用过的实例把刚建好的库回收掉（n5）。
+  const ready = (async () => {
+    let s
+    try {
+      s = await createStore({ root, forceJsonl: Boolean(cfg.jsonl), log })
+    } catch (e) {
+      log(`启动失败：${errText(e)}`)
+      releaseLock()
+      return null
+    }
+    if (closed) {
+      try {
+        s.close()
+      } catch {
+        /* 已经关了 */
+      }
+      releaseLock()
+      log(`启动过程中就被停用了，已回收（apply#${n}）`)
+      return null
+    }
+    store = s
+    try {
+      mindInst = createMind({
+        store: s,
+        log,
+        config: cfg.mind || {},
+        startDominance: initialDominance(s.readAll()),
+      })
+    } catch (e) {
+      log(`分流初始化失败：${errText(e)}`)
+    }
+    try {
+      log(`已就绪：${root}（${s.backend || 'sqlite'}，${s.count()} 条事件）`)
+    } catch {
+      log(`已就绪：${root}`)
+    }
+    startNightlyTimer()
+    return s
+  })()
+
+  // ---- 服务方法：每个都先 live()，拿不到库就回 not-ready --------------------
+
+  async function getMind() {
+    const s = await live()
+    if (!s) return null
+    if (!mindInst) {
+      try {
+        mindInst = createMind({
+          store: s,
+          log,
+          config: cfg.mind || {},
+          startDominance: initialDominance(s.readAll()),
+        })
+      } catch (e) {
+        log(`分流初始化失败：${errText(e)}`)
+        return null
+      }
+    }
+    return mindInst
+  }
+
+  const notReady = () => ({ ok: false, reason: 'not-ready' })
+
+  async function recall(input = {}, kArg, budgetArg) {
+    const s = await live()
+    if (!s) return notReady()
+    const o = optionsOf(input)
+    const query = typeof input === 'string' ? input : String(o.query ?? '')
+    const k = Number(o.k ?? kArg)
+    const budget = Number(o.budget ?? budgetArg)
+    return {
+      ok: true,
+      ...search(s, {
+        query,
+        k: Number.isFinite(k) && k > 0 ? k : 8,
+        budget: Number.isFinite(budget) && budget > 0 ? budget : 800,
+      }),
+    }
+  }
+
+  async function remember(input, typeArg, refsArg) {
+    const s = await live()
+    if (!s) return notReady()
+    const o = optionsOf(input)
+    const text = textOf(input)
+    const type = typeof input === 'string' ? typeArg : o.type
+    const refs = typeof input === 'string' ? refsArg : o.refs
+    try {
+      const event = await s.append({
+        type: type || 'utterance',
+        text,
+        refs: Array.isArray(refs) ? refs : [],
+        source: 'tool',
+      })
+      return { ok: true, event, id: event?.id ?? null }
+    } catch (e) {
+      return { ok: false, reason: errText(e) }
+    }
+  }
+
+  async function ask(input, refsArg) {
+    const s = await live()
+    if (!s) return notReady()
+    const o = optionsOf(input)
+    const text = textOf(input)
+    const refs = typeof input === 'string' ? refsArg : o.refs
+    try {
+      const event = await s.append({
+        type: 'ask',
+        text,
+        refs: Array.isArray(refs) ? refs : [],
+        source: 'tool',
+      })
+      return { ok: true, event, id: event?.id ?? null }
+    } catch (e) {
+      return { ok: false, reason: errText(e) }
+    }
+  }
+
+  async function cardPatch(args = {}) {
+    const s = await live()
+    if (!s) return { ok: false, decision: 'rejected', rev: 0, reasons: ['not-ready'] }
+    try {
+      return await patchCard(args, {
+        root,
+        store: s,
+        now: Date.now(),
+        log,
+        // 第八道闸只认 reviewModel；没有就显式关掉（card.js 自己会 log 一次）。
+        cfg: {
+          reviewModel: cfg.card?.reviewModel,
+          review: cfg.card?.review !== false,
+        },
+        reviewer: makeReviewer(),
+      })
+    } catch (e) {
+      return { ok: false, decision: 'rejected', rev: 0, reasons: [errText(e)] }
+    }
+  }
+
+  /** 日记：同一天接在后面（diaryPut 是 INSERT OR REPLACE，不能直接写两次）。 */
+  async function diary(input) {
+    const s = await live()
+    if (!s) return notReady()
+    const o = optionsOf(input)
+    const text = textOf(input)
+    if (!String(text ?? '').trim()) return { ok: false, reason: '没写进日记' }
+    const now = Date.now()
+    const day = o.day != null && String(o.day).trim() ? String(o.day) : dayOf(now)
+    let prior = ''
+    try {
+      const rows = typeof s.diaryAll === 'function' ? s.diaryAll() : []
+      const row = Array.isArray(rows) ? rows.find((x) => String(x?.day) === day) : null
+      prior = row ? String(row.text ?? '') : ''
+    } catch {
+      prior = ''
+    }
+    const merged = prior.trim() ? `${prior.replace(/\s+$/, '')}\n\n${text}` : text
+    try {
+      s.diaryPut([{ day, text: merged, at: now }])
+      return { ok: true, day, text: merged, chars: merged.length }
+    } catch (e) {
+      return { ok: false, reason: errText(e) }
+    }
+  }
+
+  /** 起点状态：形状照 contract/console 的期望（limits 用 fragment，不是 perFragment）。 */
+  async function seed() {
+    const s = await live()
+    if (!s) return notReady()
+    const events = s.readAll() || []
+    const ev = seedOf(events)
+    const fragments = ev
+      ? Array.isArray(ev.meta?.fragments)
+        ? ev.meta.fragments.map(String)
+        : String(ev.text ?? '')
+            .split(/\n{2,}/)
+            .filter(Boolean)
+      : []
+    const current = ev
+      ? {
+          text: String(ev.text ?? ''),
+          fragments,
+          chars: Number(ev.meta?.chars) || fragments.join('').length,
+          bias: ev.meta?.bias ? String(ev.meta.bias) : null,
+          biasName: biasOf(ev.meta?.bias)?.name ?? null,
+          at: Number(ev.ts) || null,
+          day: ev.day ?? null,
+          source: ev.source ?? null,
+        }
+      : null
+    return {
+      ok: true,
+      hasSeed: !!ev,
+      canWrite: !ev,
+      limits: { fragments: MAX_FRAGMENTS, fragment: MAX_FRAGMENT, total: MAX_TOTAL },
+      biases: BIASES.map((b) => ({ id: b.id, name: b.name, hint: b.hint })),
+      current,
+      demo: ev ? null : { name: ADULT_NAME, label: ADULT_LABEL },
+      adult: { name: ADULT_NAME, label: ADULT_LABEL, available: !ev },
+    }
+  }
+
+  async function writeSeed(texts, bias) {
+    const s = await live()
+    if (!s) return notReady()
+    const r = await writeSeedToStore({ store: s, texts, bias })
+    // 起点决定初始主导：写完把缓存的分流状态丢掉，下一次 describe 才是新的开始。
+    if (r?.ok) {
+      mindInst = null
+      await getMind()
+    }
+    return r
+  }
+
+  /**
+   * 领养成年鱼：只在还没有起点时可用（n44）。
+   * 失败原样退回 adoptAdult 的 {ok:false, reason}；成功要重算分流（起点变了）。
+   */
+  async function adopt() {
+    const s = await live()
+    if (!s) return notReady()
+    let r
+    try {
+      r = await adoptAdult({ root, store: s, file: ADULT_FILE, now: Date.now() })
+    } catch (e) {
+      return { ok: false, reason: errText(e) }
+    }
+    if (!r?.ok) return r ?? { ok: false, reason: '领养失败' }
+    // 样本自带起点和偏向，缓存里的旧主导（多半是空库时的 0.5）必须丢掉。
+    mindInst = null
+    await getMind()
+    // 领养成功 → 顺手把家建出来（幂等；宿主不支持就只 log 一行，不影响领养结果）。
+    // 不阻塞：服务晚就绪时要等重试窗口，领养结果不该跟着一起拖。
+    void ensureHomeOnce().catch((e) => {
+      log(`家没建好：${errText(e)}`)
+    })
+    return { ok: true, name: r.name, label: r.label, events: r.events, demo: true }
+  }
+
+  /** 事件流里的成年鱼标记 → {name,label}|null。只认 meta.kind='demo'，不看配置。 */
+  function demoOf(events) {
+    return isDemo(events) ? { name: demoName(events), label: demoLabel(events) } : null
+  }
+
+  async function demoInfo() {
+    const s = await live()
+    if (!s) return notReady()
+    const d = demoOf(s.readAll() || [])
+    return { ok: true, demo: d != null, name: d?.name ?? null, label: d?.label ?? null }
+  }
+
+  /** 当前昵称：事件流里最后一条 meta.kind='nickname'；没有就 null。 */
+  async function nickname() {
+    const s = await live()
+    if (!s) return notReady()
+    return { ok: true, nickname: nicknameOf(s.readAll() || []) }
+  }
+
+  /**
+   * 改昵称：只追加一条事件，不改固定名字；只有成年鱼能改（判据同工具面/面板，只看事件流）。
+   * 返回 lib/nickname.js 的 {ok:true,name,event} 或 {ok:false,reason}。
+   */
+  async function setNickname(name) {
+    const s = await live()
+    if (!s) return notReady()
+    let events = []
+    try {
+      events = s.readAll() || []
+    } catch {
+      events = []
+    }
+    if (!isDemo(events)) return { ok: false, reason: '只有成年鱼可以起昵称' }
+    return writeNickname({ store: s, name, now: Date.now() })
+  }
+
+  /**
+   * 开发者钥匙状态：只回有没有，**绝不回 key/哈希**。发布版没有钥匙模块 → ok:false。
+   */
+  async function devkey() {
+    const m = await waitDevkey()
+    if (!m) return { ok: false, reason: '开发者钥匙不可用' }
+    return { ok: true, hasKey: m.hasDevkey(root) }
+  }
+
+  /** 重置开发者钥匙：明文只在这一刻返回一次；旧 key 立刻失效。 */
+  async function rotateDevkey() {
+    const m = await waitDevkey()
+    if (!m) return { ok: false, reason: '开发者钥匙不可用' }
+    try {
+      return { ok: true, ...m.rotateDevkey(root) }
+    } catch (e) {
+      return { ok: false, reason: errText(e) }
+    }
+  }
+
+  /** 删掉开发者钥匙（面板/接口的 DELETE 入口）。 */
+  async function deleteDevkey() {
+    const m = await waitDevkey()
+    if (!m) return { ok: false, reason: '开发者钥匙不可用' }
+    const removed = m.deleteDevkey(root)
+    return { ok: true, removed, hasKey: m.hasDevkey(root) }
+  }
+
+  /**
+   * 固定段覆盖（`<root>/persona-fixed.md`）：读现状、写、清。
+   * 文件层由 lib/personafile.js 负责（备份 + 原子写 + 4000 字上限）；这里不加闸——
+   * 只有持钥匙的人能走到这里，且只影响成年鱼（普通鱼没有 pisces:fixed）。
+   */
+  async function fixed() {
+    const override = readFixedOverride(root)
+    return { ok: true, overridden: override != null, text: override ?? FIXED_PERSONA }
+  }
+
+  function setFixed(text) {
+    return writeFixedOverride(root, text)
+  }
+
+  function clearFixed() {
+    return clearFixedOverride(root)
+  }
+
+  /**
+   * 开发者直接写卡（`pisces_dev action:'card'` 的依赖）：钥匙已经由工具层验过，
+   * 这里只负责取库、写卡、刷摘要、落 `card_patch(dev:true)`；返回 {ok,rev} 或 {ok:false,reason}。
+   */
+  async function devCard({ text } = {}) {
+    const s = await live()
+    if (!s) return { ok: false, reason: '库没读到' }
+    try {
+      return await devWriteSelf(root, { text, store: s, now: Date.now(), log })
+    } catch (e) {
+      return { ok: false, reason: errText(e) }
+    }
+  }
+
+  /**
+   * 开发者看人设卡（`pisces_dev action:'card-read'` 的依赖）：只读 `card/self.md`，
+   * 不建卡、不写卡、不刷摘要、不落事件。返回 {ok:true,text,rev}（text 是正文，不含「# 我」抬头）
+   * 或 {ok:false,reason}；卡文件不存在/是空的时候 reason 是「卡还没写」。
+   */
+  async function readCardSelf() {
+    try {
+      const card = readCard(root)
+      const raw = String(card.self ?? '')
+      if (!raw.trim()) return { ok: false, reason: '卡还没写' }
+      return { ok: true, text: card.selfBody, rev: Number(card.state?.rev) || 0 }
+    } catch (e) {
+      return { ok: false, reason: errText(e) }
+    }
+  }
+
+  /**
+   * 家：在宿主侧栏建一个工作区 + 一条会话，名字跟着成年鱼的名字走（lib/home.js 负责幂等）。
+   * 领养成功和启动（已有 demo/起点）两处都调它，测试里 service.home() 也能直接调。
+   * 失败只回 {ok:false, reason}、只 log 一行，不阻塞启动（宿主没有 workspaceRegistry 也照跑）。
+   */
+  async function ensureHomeOnce() {
+    if (cfg.home?.enabled === false) return { ok: false, reason: '家没开（config.home.enabled=false）' }
+    let fish = null
+    try {
+      const s = await live()
+      const events = s ? s.readAll() || [] : []
+      // 只有成年鱼才有名字；普通鱼叫「肥鱼」（homeTitles 的缺省）。
+      if (isDemo(events)) fish = demoName(events) || null
+    } catch {
+      fish = null
+    }
+    const homeCfg = cfg.home && typeof cfg.home === 'object' ? cfg.home : {}
+    let r
+    try {
+      // 宿主的 workspace 服务可能比插件晚注册：拿不到就等在重试窗口里（n52/n55）。
+      r = await ensureHomeWithRetry({
+        ctx: safeCtx,
+        root,
+        name: fish,
+        log,
+        retryMs: homeCfg.retryMs,
+        max: homeCfg.max,
+        // 测试注入用：生产配置别填。
+        wait: homeCfg.wait,
+      })
+    } catch (e) {
+      r = { ok: false, reason: errText(e) }
+    }
+    if (r?.ok) log(`家建好了：${r.workspaceTitle} / ${r.sessionTitle}`)
+    else log(`家没建好：${r?.reason ?? '原因不明'}`)
+    return r
+  }
+
+  async function state() {
+    const s = await live()
+    if (!s) return notReady()
+    const events = s.readAll() || []
+    const d = deriveSelf(events)
+    let mode = null
+    try {
+      const raw = s.modeGet?.('state')
+      mode = raw ? JSON.parse(raw) : null
+    } catch {
+      mode = null
+    }
+    const md = (await getMind())?.describe?.() || {}
+    const open = listQuestions(s, { status: 'open', limit: 3 })
+    const openAll = listQuestions(s, { status: 'open', limit: 50 })
+    const dreams = events.filter((e) => e.type === 'dream_sim' && e.meta?.status !== 'rejected')
+    const dreamsRejected = events.filter((e) => e.type === 'dream_sim' && e.meta?.status === 'rejected')
+    const verified = events.filter((e) => e.meta?.kind === 'dream_observed')
+    const recent = events
+      .filter((e) => RECENT_TYPES.includes(e.type))
+      .slice(-5)
+      .reverse()
+      .map((e) => ({ id: e.id, day: e.day, type: e.type, text: e.text, ts: e.ts }))
+    const attribution = { d: 0, i: 0, null: 0, total: 0 }
+    try {
+      for (const row of s.attribAll?.() || []) {
+        const key = row?.label === 'd' || row?.label === 'i' ? row.label : 'null'
+        attribution[key] += 1
+        attribution.total += 1
+      }
+    } catch {
+      /* 归因表读不到不算错 */
+    }
+    // 好感：从事件流推导（lib/affinity.js），不落库、不加计数器表；派希丝的数字过 reveal 遮罩。
+    const demo = demoOf(events)
+    let allQuestions = []
+    try {
+      allQuestions = s.questionAll?.() || []
+    } catch {
+      allQuestions = []
+    }
+    const reveal = demo ? computeReveal({ events, now: Date.now() }) : null
+    const affinity = maskAffinity(
+      computeAffinity({ events, questions: allQuestions, now: Date.now() }),
+      reveal ? reveal.level : Infinity,
+    )
+    return {
+      ok: true,
+      day: d.day,
+      events: events.length,
+      backend: s.backend || 'sqlite',
+      // 面板用：成年鱼时给 {name,label}，普通鱼 null（判据同工具面，只看事件流）。
+      demo,
+      affinity,
+      order: mode?.order ?? md.order ?? 'E=R',
+      dominance: mode?.dominance ?? md.dominance ?? 0.5,
+      split: mode?.split != null || md.splitAt != null,
+      attribution,
+      openQuestions: openAll.length,
+      questions: open,
+      dreams: dreams.length,
+      dreamsRejected: dreamsRejected.length,
+      verified: verified.length,
+      recent,
+    }
+  }
+
+  /**
+   * 开发者看完整状态（`pisces_dev action:'state'` 的依赖）：**绕过**面板/接口的 reveal 遮罩
+   * （n57：遮罩只管面板和 `/state` 路由，这一支只回聊天），读全部事件（含成年鱼样本自带的
+   * 90 天历史）、分流、派生、好感与悬着的问题，折成一段人话。
+   * 只读：不写事件、不动卡、不改遮罩；格式化是 tools.js 的纯函数 `buildDevState`。
+   * 没有库 / 读失败回人话（不抛给宿主），其余每一步失败都各自降级。
+   */
+  async function fullState() {
+    let s = null
+    try {
+      s = await live()
+    } catch {
+      s = null
+    }
+    if (!s) return '[看不出：库没读到]'
+    let events = []
+    try {
+      events = s.readAll() || []
+    } catch {
+      return '[看不出：库没读到]'
+    }
+    const derived = deriveSelf(events)
+    let mind = {}
+    try {
+      mind = (await getMind())?.describe?.() || {}
+    } catch {
+      mind = {}
+    }
+    let questions = []
+    try {
+      questions = listQuestions(s, { status: 'open', limit: 50 })
+    } catch {
+      questions = []
+    }
+    let allQuestions = []
+    try {
+      allQuestions = s.questionAll?.() || []
+    } catch {
+      allQuestions = []
+    }
+    let attrib = []
+    try {
+      attrib = s.attribAll?.() || []
+    } catch {
+      attrib = []
+    }
+    let affinity = null
+    try {
+      affinity = computeAffinity({ events, questions: allQuestions, now: Date.now() })
+    } catch {
+      affinity = null
+    }
+    return buildDevState({ events, derived, mind, affinity, questions, attrib })
+  }
+
+  /**
+   * 体检：给 pisces_check 用的一行回执。只读（state + 现算好感 + 问题表），不落库、不写事件。
+   * 不抛：任何一步失败都回「[看不出] 面板没读出来」。
+   */
+  async function checkup() {
+    try {
+      const st = await service.state()
+      if (!st || st.ok === false) return '[看不出] 面板没读出来'
+      const s = await live()
+      if (!s) return '[看不出] 面板没读出来'
+      let events = []
+      try {
+        events = s.readAll() || []
+      } catch {
+        events = []
+      }
+      let allQuestions = []
+      try {
+        allQuestions = s.questionAll?.() || []
+      } catch {
+        allQuestions = []
+      }
+      const hasSeed = events.some((e) => e?.type === 'seed')
+      // 好感从事件流现算（不走 state.affinity：成年鱼那份是遮过的）。
+      const affinity = computeAffinity({ events, questions: allQuestions, now: Date.now() })
+      const open = allQuestions.filter((q) => String(q?.status) === 'open')
+      let last = null
+      try {
+        last = getNightly()?.last?.() ?? null
+      } catch {
+        last = null
+      }
+      const lastAt = Number(last)
+      const hasLast = last != null && Number.isFinite(lastAt)
+      const lastText = hasLast ? dayOf(lastAt) : '还没整理过'
+      const problems = []
+      if (!hasSeed) problems.push('没起点')
+      if (hasLast ? Date.now() - lastAt > CHECK_STALE_MS : events.length > 1) problems.push('很久没整理')
+      const staleQuestion = open.some((q) => {
+        const since = Number(q?.since)
+        return Number.isFinite(since) && Date.now() - since > CHECK_STALE_MS
+      })
+      if (staleQuestion) problems.push('有问题悬着太久')
+      const nums = `天数 ${Math.trunc(Number(st.day) || 0)} · 事件 ${Math.trunc(Number(st.events) || 0)} · 问题 ${open.length} · 好感 ${Math.round(Number(affinity.value) || 0)} · 上次整理 ${lastText}`
+      return problems.length ? `[有点问题] ${problems.join(' / ')} · ${nums}` : `[她挺好] ${nums}`
+    } catch {
+      return '[看不出] 面板没读出来'
+    }
+  }
+
+  async function derive() {
+    const s = await live()
+    if (!s) return notReady()
+    return { ok: true, ...deriveSelf(s.readAll() || []) }
+  }
+
+  async function exportCard(opts = {}) {
+    const s = await live()
+    if (!s) return notReady()
+    const o = optionsOf(opts)
+    return exportCardV2({
+      root,
+      store: s,
+      now: Number(o.now) || Date.now(),
+      outPath: o.outPath ?? null,
+    })
+  }
+
+  async function exportSoul(opts = {}) {
+    const s = await live()
+    if (!s) return notReady()
+    const o = optionsOf(opts)
+    return exportSoulBundle({
+      root,
+      store: s,
+      now: Number(o.now) || Date.now(),
+      outPath: o.outPath ?? null,
+    })
+  }
+
+  async function importFish(target) {
+    const s = await live()
+    if (!s) return notReady()
+    const dir = typeof target === 'string' ? target : target?.dir ?? target?.file ?? ''
+    if (!dir) return { ok: false, reason: '要给我 dsh-fish 的目录' }
+    try {
+      if (/\.jsonl$/i.test(String(dir))) {
+        return await importFishEvents({ file: String(dir), store: s, log })
+      }
+      return await importFishRoot({ dir: String(dir), store: s, log })
+    } catch (e) {
+      return { ok: false, reason: errText(e) }
+    }
+  }
+
+  async function importSoul(target) {
+    const s = await live()
+    if (!s) return notReady()
+    const file = typeof target === 'string' ? target : target?.file
+    if (!file) return { ok: false, reason: '要给我 bundle 文件' }
+    try {
+      return await importSoulBundle({ file: String(file), store: s, root, now: Date.now() })
+    } catch (e) {
+      return { ok: false, reason: errText(e) }
+    }
+  }
+
+  // world：既是一个「看常识层」的函数，也带 import/summary/threads 三个入口。
+  async function world(input = {}) {
+    const s = await live()
+    if (!s) return notReady()
+    const o = typeof input === 'string' ? { file: input } : optionsOf(input)
+    if (o.file) {
+      try {
+        return await importBrain({ file: o.file, store: s, log })
+      } catch (e) {
+        return { ok: false, reason: errText(e) }
+      }
+    }
+    return {
+      ok: true,
+      ...worldSummary(s),
+      threads: worldThreads(s, { limit: Number(o.limit) || 5 }),
+    }
+  }
+  world.import = async (file) => {
+    const s = await live()
+    if (!s) return notReady()
+    if (!file) return { ok: false, reason: '要给我 brain.json' }
+    try {
+      return await importBrain({ file, store: s, log })
+    } catch (e) {
+      return { ok: false, reason: errText(e) }
+    }
+  }
+  world.summary = async () => {
+    const s = await live()
+    return s ? { ok: true, ...worldSummary(s) } : notReady()
+  }
+  world.threads = async (opts = {}) => {
+    const s = await live()
+    return s ? { ok: true, threads: worldThreads(s, opts) } : notReady()
+  }
+
+  async function learn(opts = {}) {
+    const s = await live()
+    if (!s) return notReady()
+    const o = optionsOf(opts)
+    const out = await learnFromStore({
+      store: s,
+      now: Number(o.now) || Date.now(),
+      maxQuestions: o.maxQuestions,
+      fetchImpl: o.fetchImpl,
+      log,
+    })
+    return out ?? notReady()
+  }
+
+  async function verify(opts = {}) {
+    const s = await live()
+    if (!s) return notReady()
+    const o = optionsOf(opts)
+    return verifyDreams({
+      store: s,
+      now: Number(o.now) || Date.now(),
+      windowDays: o.windowDays,
+      maxAgeDays: o.maxAgeDays,
+      minOverlap: o.minOverlap,
+      log,
+    })
+  }
+
+  /** 第八道闸的旁路复审：宿主有 llm 且配了 card.reviewModel 才开。 */
+  function makeReviewer() {
+    let llm = null
+    try {
+      llm = (typeof safeCtx.get === 'function' ? safeCtx.get('llm') : null) || safeCtx.llm || null
+    } catch {
+      llm = null
+    }
+    const rm = cfg.card?.reviewModel
+    if (!llm || !rm?.provider || !rm?.model) return null
+    return {
+      async ask(prompt) {
+        const text = String(prompt ?? '')
+        if (typeof llm.ask === 'function') {
+          return String(await llm.ask(text, { provider: rm.provider, model: rm.model, maxTokens: 120 }))
+        }
+        if (typeof llm.stream === 'function') {
+          let out = ''
+          const stream = llm.stream({
+            provider: rm.provider,
+            model: rm.model,
+            maxTokens: 120,
+            messages: [{ role: 'user', content: text }],
+          })
+          for await (const chunk of stream) {
+            if (chunk == null) continue
+            if (typeof chunk === 'string') {
+              out += chunk
+              continue
+            }
+            out += String(
+              chunk.text ??
+                chunk.delta ??
+                chunk.content ??
+                chunk?.choices?.[0]?.delta?.content ??
+                '',
+            )
+          }
+          return out
+        }
+        throw new Error('宿主没有可用的 llm.stream')
+      },
+    }
+  }
+
+  /**
+   * 夜间模型是显式 opt-in：只有 cfg.nightly.model.enabled === true 才碰本地模型。
+   * 默认不拉、不猜本地有没有模型——ollama 不在时归因逐条等 20s，40 次就是十几分钟（n39）。
+   * 探活只做一次（3s 超时）；失败就一直用 null（只用规则），成功才建模型并重建 nightly。
+   * `probe` / `create` 两个键只给测试注入用，生产配置别填。
+   */
+  function startNightlyProbe() {
+    if (nightlyProbed) return
+    nightlyProbed = true
+    const mcfg = cfg.nightly?.model && typeof cfg.nightly.model === 'object' ? cfg.nightly.model : {}
+    const { probe: probeImpl, create: createImpl, enabled: _enabled, ...modelOpts } = mcfg
+    const probe = typeof probeImpl === 'function' ? probeImpl : probeLocalModel
+    const create = typeof createImpl === 'function' ? createImpl : createLocalModel
+    void (async () => {
+      try {
+        // 固定 3s：别用 model 的 20s——探活就是为了不每条都等超时。
+        const r = await probe({ ...modelOpts, timeoutMs: 3000 })
+        if (!r?.ok) {
+          log('本地模型不在，夜间只用规则')
+          return
+        }
+        nightlyModel = create(modelOpts)
+        // 探活回来之前创建的实例拿的是 null；重建一次，后续 run 才用得上模型。
+        nightlyInst = null
+        log('本地模型已就绪，夜间可以用它')
+      } catch (e) {
+        log(`本地模型不在，夜间只用规则（${errText(e)}）`)
+      }
+    })()
+  }
+
+  function getNightly() {
+    if (cfg.nightly?.enabled === false) return null
+    const s = store
+    if (!s || (typeof s.isOpen === 'function' && !s.isOpen())) return null
+    if (!nightlyInst) {
+      const ncfg = cfg.nightly || {}
+      const wantsModel = ncfg.model?.enabled === true
+      if (wantsModel && !nightlyModel) startNightlyProbe()
+      // 没显式打开、或探活还没成功：传 null，夜间只跑规则。
+      const model = wantsModel ? nightlyModel : null
+      const inst = createNightly({
+        store: s,
+        log,
+        config: ncfg,
+        model,
+        learn: (o) => service.learn(o),
+        mind: mindInst,
+      })
+      // 只读快照，给测试/面板看这次夜间用的是哪个模型（不是 nightly 契约的一部分）。
+      try {
+        inst.model = model
+      } catch {
+        /* 冻结对象就算了 */
+      }
+      nightlyInst = inst
+    }
+    return nightlyInst
+  }
+
+  async function checkNightly() {
+    try {
+      const nightly = getNightly()
+      if (!nightly) return
+      const due = nightly.due({})
+      if (!due?.ok) return
+      const r = await nightly.run({})
+      if (r?.ran) log(`夜间流水线跑完：${r.steps ? Object.keys(r.steps).join('/') : ''}`)
+    } catch (e) {
+      log(`夜间流水线失败：${errText(e)}`)
+    }
+  }
+
+  function startNightlyTimer() {
+    if (cfg.nightly?.auto === false) return
+    if (nightlyTimer) return
+    nightlyTimer = setInterval(() => {
+      void checkNightly()
+    }, NIGHTLY_TICK_MS)
+    nightlyTimer.unref?.()
+  }
+
+  /** 设置中心：每次都现读文件（面板打开时要看到刚存的值，而不是启动快照）。 */
+  function settingsInfo() {
+    // publicSettings：隐藏项（persona.guard）既不进 schema，也不从接口回值。
+    return { ok: true, settings: publicSettings(readSettings(root)), schema: SETTINGS_SCHEMA, root }
+  }
+
+  /** 写设置：校验与落盘在 lib/settings.js；needsRestart 只含 SCHEMA 里 restart:true 的项。 */
+  async function saveSettings(patch) {
+    const r = writeSettings(root, patch)
+    if (!r.ok) return r
+    const out = { ok: true, settings: publicSettings(r.settings), changed: r.changed || [], needsRestart: r.needsRestart || [] }
+    if (r.ignored) out.ignored = r.ignored
+    if (r.note) out.note = r.note
+    return out
+  }
+
+  /** 贴吧登录状态：只读本地文件（保存时已经验过一次，不每次开面板都联网）。 */
+  async function baiduStatus() {
+    const saved = readBaidu(root)
+    if (!saved) return { ok: true, loggedIn: false, name: null, hasCookie: false }
+    return { ok: true, loggedIn: true, name: saved.name || null, hasCookie: true }
+  }
+
+  /** 贴吧登录：粘贴 cookie → 验证 → 落盘；失败原因由 lib/baidu.js 给，不打印 cookie。 */
+  function baiduLogin(text) {
+    return loginBaidu({ root, text })
+  }
+
+  function baiduLogout() {
+    return { ok: true, removed: clearBaidu(root) }
+  }
+
+  /**
+   * 语音回复状态：只回有没有适配器、是哪种。
+   * available 同时受隐藏开关约束；没有适配器时恒为 false（宿主现在就是这样）。
+   */
+  function voiceInfo() {
+    const available = Boolean(voiceAdapter?.ok) && voiceEnabled
+    return { ok: true, available, kind: available ? voiceAdapter.kind : null }
+  }
+
+  /**
+   * 条件触发：只有「用户这条是语音」且「有适配器」且「开关没关」才合成。
+   * 他打字时回固定 reason，不生成文件；合成失败也只回 `{ok:false, reason}`。
+   * 未来 QQ/微信桥接这一条：传 {text: 她要说的, input: 收到的消息}，拿 {file, mime} 发出去。
+   */
+  async function voiceReply(input = {}) {
+    const o = optionsOf(input)
+    const text = textOf(input)
+    const heard = o.input !== undefined ? o.input : o
+    if (!shouldReplyWithVoice({ adapter: voiceAdapter, input: heard, enabled: voiceEnabled })) {
+      return { ok: false, reason: '他用文字说的，不用语音回' }
+    }
+    return synthesizeToFile({ adapter: voiceAdapter, text, outDir: join(root, VOICE_DIR), format: voiceFormat })
+  }
+
+  const service = {
+    ready,
+    root,
+    paths: p,
+    settings: settingsInfo,
+    setSettings: saveSettings,
+    baiduStatus,
+    baiduLogin,
+    baiduLogout,
+    // 语音回复：状态 + 条件触发。不进面板；未来桥只调 voiceReply。
+    voice: voiceInfo,
+    voiceReply,
+    recall,
+    remember,
+    ask,
+    cardPatch,
+    // 开发者能力只在开发版挂到 service 上；发布版连属性都不出现（n74）。
+    ...(isRelease
+      ? {}
+      : {
+          // 开发者带钥匙直写卡（绕闸，但抬头/长度仍强制，落 dev:true 的 card_patch）。
+          devCard,
+          devkey,
+          rotateDevkey,
+          deleteDevkey,
+        }),
+    diary,
+    seed,
+    writeSeed,
+    adopt,
+    demoInfo,
+    nickname,
+    setNickname,
+    // 固定段的文件覆盖：下一轮 attach 现读，不用重启。
+    fixed,
+    setFixed,
+    clearFixed,
+    // 家的调试入口：返回 ensureHome 的结果（幂等，重复调不新建）。
+    home: () => ensureHomeOnce(),
+    learn,
+    verify,
+    state,
+    derive,
+    exportCard,
+    exportSoul,
+    importFish,
+    importSoul,
+    world,
+    get nightly() {
+      return getNightly()
+    },
+    // 给面板/别的插件用的只读概览；不在契约里，但保留旧实现的出口。
+    async observe() {
+      const s = await live()
+      if (!s) return notReady()
+      const events = s.readAll() || []
+      return {
+        ok: true,
+        day: deriveSelf(events).day,
+        events: events.length,
+        questions: listQuestions(s, { status: 'open', limit: 50 }).length,
+        dreams: events.filter((e) => e.type === 'dream_sim' && e.meta?.status !== 'rejected').length,
+        verified: events.filter((e) => e.meta?.kind === 'dream_observed').length,
+      }
+    },
+  }
+
+  // 6. 旧实现的服务名就是 persona；没有 provide 就只记一行。
+  try {
+    if (typeof safeCtx.provide === 'function') {
+      safeCtx.provide('persona', service)
+      log('persona 服务已注册')
+    } else {
+      log('没有 ctx.provide，persona 服务跳过')
+    }
+  } catch (e) {
+    log(`注册 persona 服务失败：${errText(e)}`)
+  }
+
+  // 7. 工具面：放在 ready.then 里（演示标记要等库打开）；getStore 必须是 live()。
+  if (cfg.tools !== false) {
+    ready.then(async (s) => {
+      try {
+        let st = s
+        if (!st) {
+          try {
+            st = await ensureLive()
+          } catch (e) {
+            log(`按需开库失败：${errText(e)}`)
+          }
+        }
+        // 成年鱼标记只能在库打开后读事件流才知道（n26/n28）；任务契约里的 demo 探测。
+        let evs = []
+        try {
+          evs = st ? st.readAll() || [] : []
+        } catch {
+          evs = []
+        }
+        const adult = isDemo(evs)
+        // 发布标记交给 tools.js 兜底：即使依赖手滑传进来，release=true 也不注册 pisces_dev。
+        const toolDeps = {
+          isRelease,
+          getStore: () => live(),
+          log,
+          patchCard: (args) => service.cardPatch(args),
+          rec: (o) => service.recall(o),
+          // B 站：look 只读公开热门；speak 的开关在 lib/speak.js 里判（cfg.bili.speak===true），
+          // 所以 cfg 要传整份配置（speakEnabled 读的是 cfg.bili.speak，不是 cfg.speak）。
+          // 关着时回执是「说话功能没开」，普通鱼的工具面仍是 7 个（n23）。
+          look: (o) => hot({ limit: o?.limit }),
+          speak: (o) => speakOnBili({ root, bvid: o?.bvid, text: o?.text, cfg, log }),
+          // 成年鱼四个特权动作的依赖；普通鱼 demo=null，tools.js 不会注册它们。
+          selfView: async () => {
+            const s2 = await live()
+            if (!s2) return { ok: false, reason: 'not-ready' }
+            const d = deriveSelf(s2.readAll() || [])
+            let split = false
+            try {
+              const desc = (await getMind())?.describe?.() || null
+              split = desc?.splitAt != null
+            } catch {
+              split = false
+            }
+            // 只给天数与四个计数；dominance / 权重 / order 一律不出现在自查里。
+            return {
+              ok: true,
+              view: {
+                day: d.day,
+                beliefs: d.beliefs.length,
+                refusals: d.refusals.length,
+                scars: d.scars.length,
+                split,
+              },
+            }
+          },
+          teach: (topic) => teachFor(topic),
+          // 新手引导直接用 lib/guide.js（纯函数）；状态从这里递进去，读不到就 null。
+          guide,
+          guideState: async () => {
+            const st = await service.state()
+            if (!st || st.ok === false) return null
+            let hasSeed = false
+            try {
+              const s2 = await live()
+              hasSeed = (s2?.readAll?.() || []).some((e) => e?.type === 'seed')
+            } catch {
+              hasSeed = false
+            }
+            return { hasSeed, events: st.events, tier: st.affinity?.tier ?? 0 }
+          },
+          // 体检读库与状态，失败也不抛。
+          check: () => checkup(),
+          // 昵称：她给自己记一个称呼（固定名字仍是派希丝，事件流追加，取最后一条）。
+          setNickname: (name) => service.setNickname(name),
+          // 成年鱼标记：发布版没有 devkey，所以 12 个动作；开发版 13 个（n74）。
+          demo: adult
+            ? {
+                selfInspect: true,
+                teach: true,
+                guide: true,
+                check: true,
+                nickname: true,
+                ...(isRelease ? {} : { devkey: true }),
+              }
+            : null,
+        }
+
+        // 开发者依赖只在开发版注入；发布包里这几个键一个都不出现（n74）。
+        if (!isRelease) {
+          Object.assign(toolDeps, {
+            // 开发者直接写卡：绕八道闸，但抬头/长度仍由 card.js 强制。
+            devCard: (args) => service.devCard(args),
+            // 开发者只读查询：看卡原文 / 看运行时固定段原文；都不写任何东西。
+            readCardSelf: () => readCardSelf(),
+            personaText: () => FIXED_PERSONA,
+            // 固定段的文件覆盖（<root>/persona-fixed.md）：读现状 / 整段写 / 删掉回默认。
+            fixedGet: () => service.fixed(),
+            fixedSet: ({ text } = {}) => service.setFixed(text),
+            fixedClear: () => service.clearFixed(),
+            // 看她自己怎么想（pisces_dev 的 trace）：读库 + 分流 + 派生 + 好感 + 悬着的问题，
+            // 折成一段人话；格式化是 tools.js 的纯函数 buildTrace，这里只负责取数。
+            trace: async ({ limit } = {}) => {
+              const s = await live()
+              if (!s) throw new Error('库没读到')
+              let events = []
+              try {
+                events = s.readAll() || []
+              } catch {
+                throw new Error('库没读到')
+              }
+              const derived = deriveSelf(events)
+              let mind = {}
+              try {
+                mind = (await getMind())?.describe?.() || {}
+              } catch {
+                mind = {}
+              }
+              let questions = []
+              try {
+                questions = listQuestions(s, { status: 'open', limit: 50 })
+              } catch {
+                questions = []
+              }
+              let attrib = []
+              try {
+                attrib = s.attribAll?.() || []
+              } catch {
+                attrib = []
+              }
+              let affinity = null
+              try {
+                let allQuestions = []
+                try {
+                  allQuestions = s.questionAll?.() || []
+                } catch {
+                  allQuestions = []
+                }
+                affinity = computeAffinity({ events, questions: allQuestions, now: Date.now() })
+              } catch {
+                affinity = null
+              }
+              return buildTrace({ events, derived, mind, affinity, questions, attrib, limit })
+            },
+            // 看完整状态（pisces_dev 的 state）：同一批数据但不过 reveal 遮罩，读全部事件；
+            // 取数与格式化在 fullState() 里，没有库/读失败回人话。
+            devState: () => fullState(),
+            // 开发者钥匙：工具先验根目录下的 devkey.json；只给成年鱼。
+            verifyDevkey: (key) => {
+              try {
+                return devkeyMod?.verifyDevkey?.(root, key) === true
+              } catch {
+                return false
+              }
+            },
+          })
+        }
+        const r = registerTools(safeCtx, toolDeps)
+        log(r?.ok ? `工具面已注册：${r.count} 个动作` : '没有 tools 服务，工具面跳过')
+      } catch (e) {
+        log(`注册工具面失败：${errText(e)}`)
+      }
+    })
+  }
+
+  // 8. 提示词桥：默认开（attachToAgents !== false），但只挂「她屋里」那条会话。
+  //
+  // 为什么不能全挂：写代码的会话不该带上「你存在了几天」，更不该被反破甲提醒。
+  // 判据两条，任一为真：
+  //   1. cwd 在 <root>/home 之下 —— 主判据。会话刚建好时 home.json 可能还没写，
+  //      cwd 已经在了（解决 create → home.json 落盘的竞态）。
+  //   2. 会话 id === home.json 的 sessionId —— 兜住宿主没给 cwd 的情况；
+  //      读不到 home.json 就跳过这条判据，不影响启动。
+  // 两条都不满足 → 不挂。
+  if (cfg.attachToAgents !== false) {
+    const herHome = join(root, 'home')
+    const homeFile = join(root, HOME_FILE)
+    /** 每次现读：home.json 可能在插件启动之后才由 ensureHome 写出来。 */
+    const readHomeSessionId = () => {
+      try {
+        const raw = readFileSync(homeFile, 'utf8').replace(/^\uFEFF/, '')
+        const j = JSON.parse(raw)
+        return String(j?.sessionId ?? '')
+      } catch {
+        return ''
+      }
+    }
+    const shouldAttach = (agent) => {
+      try {
+        const cwd = flatPath(cwdOf(agent))
+        const home = flatPath(herHome)
+        if (cwd && home && (cwd === home || cwd.startsWith(`${home}/`))) return true
+        const sid = sidOf(agent)
+        if (!sid) return false
+        const saved = readHomeSessionId()
+        return Boolean(saved && sid === saved)
+      } catch {
+        // 判据失败最多是不挂，不能拖垮启动。
+        return false
+      }
+    }
+    try {
+      attachOff = attachToAgents(safeCtx, {
+        getStore: () => live(),
+        // 包装一层：persona 不读事件流判 demo，调用方先判再传，普通鱼才不会挂 pisces:fixed。
+        // 昵称也在这里现读事件流：service.setNickname 之后，下一次 attach 就生效。
+        // 固定段覆盖同理：每轮现读 <root>/persona-fixed.md，写完文件下一轮就换掉，不用重启。
+        buildSections: (args = {}) => {
+          let demo = false
+          let nickname = null
+          let devOverlay = null
+          let fixedText = null
+          try {
+            const events = args?.store?.readAll?.() || []
+            demo = isDemo(events)
+            nickname = nicknameOf(events)?.name ?? null
+            // 开发者钥匙改出来的人设：最后一条 dev-persona，文本为 null 就是清空了。
+            // 发布版没有钥匙，事件流里残留的 dev-persona 也不挂段（n74）。
+            devOverlay = isRelease ? null : devOverlayOf(events)
+            fixedText = readFixedOverride(root)
+          } catch {
+            demo = false
+            nickname = null
+            devOverlay = null
+            fixedText = null
+          }
+          return buildSections({ ...args, demo, nickname, devOverlay, fixedText })
+        },
+        // 反破甲默认开：只扫最后一条 user 消息，命中时 attach 给这一次请求的 system 加一句提醒。
+        ...(cfg.guard?.enabled !== false ? { scanGuard: (text) => scan(text) } : {}),
+        // 开发者钥匙：只看最后一条 user 消息；命中只给这次 system 追加一段，不写事件/不写日志。
+        // 发布版不传这个依赖，attach 的 DEV_PROMPT 注入天然关闭（n74）。
+        ...(isRelease
+          ? {}
+          : {
+              isDevkey: (text) => {
+                try {
+                  return devkeyMod?.verifyDevkey?.(root, text) === true
+                } catch {
+                  return false
+                }
+              },
+            }),
+        shouldAttach,
+        // 聊天落库的门控：llm/stream 是全局 waterfall，别的会话的生成也会经过观察器。
+        // 只有她家里那条会话（home.json 的 sessionId）才记 heard/utterance；每次现读，
+        // 读不到 home.json → false。shouldAttach 只管挂人设段，不决定记不记事件。
+        isHerSession: (sid) => Boolean(sid) && sid === readHomeSessionId(),
+        config: cfg,
+        log,
+      })
+    } catch (e) {
+      log(`挂提示词桥失败：${errText(e)}`)
+    }
+  }
+
+  // 9. 双流：只有明确 enabled 才注册 llm/stream。
+  if (cfg.dual?.enabled === true) {
+    try {
+      const mode = upperOf(cfg.dual.mode || 'A') === 'B' ? 'B' : 'A'
+      dualOff = attachDual(safeCtx, {
+        enabled: true,
+        mode,
+        cfg: cfg.dual,
+        log,
+      })
+      log(`双流已挂上：${mode} 档`)
+    } catch (e) {
+      log(`挂双流失败：${errText(e)}`)
+    }
+  }
+
+  // 10. 观测台：deps 里 service 方法原样传（闭包持库），不要传 lib 函数（n42）。
+  function consoleDeps() {
+    return {
+      // getter：宿主重开库后不要钉死在旧实例上。
+      get store() {
+        if (store && (typeof store.isOpen !== 'function' || store.isOpen())) return store
+        return ensureLive()
+      },
+      get mind() {
+        return mindInst;
+      },
+      // 诊断用：提示词桥到底挂没挂上（agentsSeen/sectionsAttached/agentsNotHer…）。
+      bridge: () => (attachOff?.info ?? null),
+      get nightly() {
+        return getNightly()
+      },
+      get dual() {
+        return dualOff?.stats?.() ?? null
+      },
+      // service 的完整状态（面板要的 demo 就在这里：成年鱼 {name,label}，普通鱼 null）。
+      state: service.state,
+      demoInfo: service.demoInfo,
+      nickname: service.nickname,
+      setNickname: (name) => service.setNickname(name),
+      // 开发者钥匙：只在开发版给路由；发布版三个键都不出现 → /devkey 回 404（n74）。
+      ...(isRelease
+        ? {}
+        : {
+            // 开发者钥匙：GET 只回 hasKey；POST 只在这一次回明文；DELETE 删文件。
+            devkey: () => service.devkey(),
+            rotateDevkey: () => service.rotateDevkey(),
+            deleteDevkey: () => service.deleteDevkey(),
+          }),
+      // 设置中心：GET /settings 读、POST /settings 写（写入口自己带 schema 校验）。
+      settings: () => service.settings(),
+      saveSettings: (patch) => service.setSettings(patch),
+      // 语音回复：只给桥/面板读状态（available/kind）；不往面板加 UI。
+      voice: () => service.voice(),
+      // 百度贴吧登录：GET /baidu 只回状态，POST /baidu 粘贴验证，DELETE /baidu 清掉。
+      baiduStatus: () => service.baiduStatus(),
+      baiduLogin: (text) => service.baiduLogin(text),
+      baiduLogout: () => service.baiduLogout(),
+      readStore: () => ensureLive(),
+      seed: service.seed,
+      writeSeed: service.writeSeed,
+      adopt: service.adopt,
+      // 手动触发建家：观测台 POST /home 用（幂等，重试窗口内会等宿主服务）。
+      home: service.home,
+      learn: service.learn,
+      verify: service.verify,
+      observe: service.observe,
+      exportCard: service.exportCard,
+      exportSoul: service.exportSoul,
+      questions: {
+        list: async (opts) => {
+          const s = await live()
+          return s ? listQuestions(s, opts) : []
+        },
+        setStatus: async (key, status) => {
+          const s = await live()
+          return s ? setQuestionStatus(s, key, status) : notReady()
+        },
+      },
+    }
+  }
+
+  // 观测台挂载（n6）：webServer 可能比插件晚就绪——apply 里当场 ctx.get 拿不到就放弃
+  // 是真机踩过的坑（/dsh-pisces-api 404）。顺序：inject(['webServer']) 等注入 → 当场取一次
+  // → 都没有再用 ctx.effect + 500ms 轮询（最多 10 次，unref），仍没有才 log 没挂上。
+  const CONSOLE_POLL_MS = 500
+  const CONSOLE_POLL_MAX = 10
+
+  function getWebServer() {
+    try {
+      return (typeof safeCtx.get === 'function' ? safeCtx.get('webServer') : null) || safeCtx.webServer || null
+    } catch {
+      return null
+    }
+  }
+
+  function stopConsolePoll() {
+    if (consolePollTimer) {
+      clearTimeout(consolePollTimer)
+      consolePollTimer = null
+    }
+  }
+
+  /** 拿到 server 就挂上；没有回 false，由调用方决定等注入还是轮询。 */
+  function mountConsole(server) {
+    if (cfg.console?.enabled === false) return false
+    if (consoleMount?.ok) return true
+    const ws = server || getWebServer()
+    if (!ws) return false
+    try {
+      // registerConsole 只认 ctx.get('webServer')；注入拿到的实例通过这层代理交给它。
+      const r = registerConsole({ get: (name) => (name === 'webServer' ? ws : null) }, consoleDeps())
+      consoleMount = r || { ok: false, reason: 'webServer 注册失败' }
+      if (r?.ok) {
+        stopConsolePoll()
+        log(`观测台已挂上：${CONSOLE_PREFIX}`)
+        return true
+      }
+      // 有 server 但注册失败：log 原因后别再无限重试。
+      log(`观测台没挂上：${r?.reason || 'webServer 注册失败'}`)
+    } catch (e) {
+      consoleMount = { ok: false, reason: errText(e) }
+      log(`观测台没挂上：${errText(e)}`)
+    }
+    return false
+  }
+
+  function startConsolePoll() {
+    if (cfg.console?.enabled === false) return
+    if (consolePollTimer || consoleMount) return
+    // 清理登记进宿主生命周期；轮询本体用 setTimeout（effect 不一定同步执行回调）。
+    if (typeof safeCtx.effect === 'function') {
+      try {
+        safeCtx.effect(() => stopConsolePoll, 'dsh-pisces-console-poll')
+      } catch {
+        /* effect 不可用不影响轮询 */
+      }
+    }
+    const tick = () => {
+      if (closed || cfg.console?.enabled === false || consoleMount) return
+      consolePollTimer = setTimeout(() => {
+        consolePollTimer = null
+        if (closed || cfg.console?.enabled === false || consoleMount) return
+        consolePollCount += 1
+        if (mountConsole()) return
+        if (consoleMount) return
+        if (consolePollCount >= CONSOLE_POLL_MAX) {
+          log('观测台没挂上：没有 webServer')
+          return
+        }
+        tick()
+      }, CONSOLE_POLL_MS)
+      consolePollTimer.unref?.()
+    }
+    tick()
+  }
+
+  function mountConsoleWhenReady() {
+    if (cfg.console?.enabled === false) return
+    // 1. 优先注入：webServer 服务晚于插件注册时靠它接上。
+    if (typeof safeCtx.inject === 'function') {
+      try {
+        const ret = safeCtx.inject(['webServer'], (sub) => {
+          if (closed || consoleMount?.ok) return
+          const ws = sub?.webServer ?? getWebServer()
+          if (ws) mountConsole(ws)
+        })
+        if (typeof ret === 'function') consoleInjectOff = ret
+      } catch (e) {
+        log(`观测台注入 webServer 失败：${errText(e)}`)
+      }
+    }
+    // 2. 当场能拿到就先挂（inject 回调不保证同步跑）。
+    if (mountConsole()) return
+    // 3. 两样都没有：轮询等它出现。
+    startConsolePoll()
+  }
+
+  mountConsoleWhenReady()
+
+  // 夜间模型显式 opt-in：开机就探一次（3s），别等第一次整理才发现模型不在。
+  if (cfg.nightly?.enabled !== false && cfg.nightly?.model?.enabled === true) startNightlyProbe()
+
+  // 11. 家：已经领养/写过起点的话，在宿主侧栏里建一个工作区 + 一条会话（幂等）。
+  // 只在事件流里有 demo 或 seed 时才建；config.home.enabled === false 时整块跳过。
+  // 失败只 log 一行，不阻塞启动——宿主没有这些服务时插件照样跑。
+  if (cfg.home?.enabled !== false) {
+    ready.then((s) => {
+      if (!s) return
+      try {
+        const events = s.readAll() || []
+        const seeded = events.some((e) => e && e.type === 'seed')
+        if (!seeded && !isDemo(events)) return
+      } catch (e) {
+        log(`家没建好：${errText(e)}`)
+        return
+      }
+      // 不阻塞：重试窗口最长约 20s，别把启动 promise 链拖住（日志顺序也靠它）。
+      void ensureHomeOnce().catch((e) => {
+        log(`家没建好：${errText(e)}`)
+      })
+    })
+  }
+
+  // 12. 人设卡篡改校验：启动后 await 一次（n9）。
+  ready.then(async (s) => {
+    if (!s) return
+    try {
+      const r = await tamperCheck(root, { store: s, log })
+      if (Array.isArray(r?.restored) && r.restored.length) {
+        log(`人设卡：发现被外面改过，已恢复 ${r.restored.join('、')}`)
+      }
+    } catch (e) {
+      log(`人设卡校验失败：${errText(e)}`)
+    }
+  })
+
+  // 13. dispose：置 closed、清定时器、摘 attach/dual/console、关库、放锁。
+  function dispose() {
+    const first = !disposed
+    disposed = true
+    closed = true
+    if (first) {
+      log(`已停用（apply#${n}）`)
+    }
+    if (nightlyTimer) {
+      clearInterval(nightlyTimer)
+      nightlyTimer = null
+    }
+    stopConsolePoll()
+    for (const off of [attachOff, dualOff, consoleMount?.dispose, consoleInjectOff]) {
+      if (typeof off !== 'function') continue
+      try {
+        off()
+      } catch {
+        /* 摘不到就算了 */
+      }
+    }
+    attachOff = null
+    dualOff = null
+    consoleMount = null
+    consoleInjectOff = null
+    const s = store
+    store = null
+    mindInst = null
+    nightlyInst = null
+    if (s) {
+      try {
+        s.close()
+      } catch {
+        /* 已经关了 */
+      }
+    }
+    releaseLock()
+  }
+
+  return dispose
+}
