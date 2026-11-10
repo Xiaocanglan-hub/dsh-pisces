@@ -2,7 +2,7 @@
 // 负载是 {agent, source, signal}、监听挂在 ctx.root、llm/stream 必须 return next()。
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { attachToAgents, DEV_PROMPT } from '../lib/attach.js'
+import { attachToAgents, DEV_PROMPT, recallBlockFrom } from '../lib/attach.js'
 import { scan, steerLines } from '../lib/guard.js'
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
@@ -672,6 +672,8 @@ function setupChat({
   store = makeStore(),
   shouldAttach = () => true,
   isHerSession = () => true,
+  isDevkey,
+  searchMemory,
 } = {}) {
   const ctx = makeCtx()
   const dispose = attachToAgents(ctx, {
@@ -680,6 +682,8 @@ function setupChat({
     config: { attachToAgents: true },
     shouldAttach,
     isHerSession,
+    isDevkey,
+    searchMemory,
     log: () => {},
   })
   ctx.root.emit('agent/created', { agent: makeAgent() })
@@ -1124,5 +1128,133 @@ test('attach 聊天清洗：Elapsed / Current runtime context / Current working 
   const heard = store.calls.filter((e) => e.type === 'heard')
   assert.equal(heard.length, 1)
   assert.equal(heard[0].text, '把窗户关上。')
+  dispose()
+})
+
+// ---- 此刻想起：每轮按他的话检索记忆，只进这一次的 system ----
+// 不写事件、不落库、不进对话；检索失败/没结果 = 不注入、不报错、不影响流。
+
+test('attach 此刻想起：她的话命中一条记忆 → system 末尾出现 [此刻想起] 与原文', () => {
+  const memory = '窗关了一半，风还是从缝里进来。'
+  const searches = []
+  const { store, listener, dispose } = setupChat({
+    isHerSession: (sid) => sid === 'sess_her',
+    // 开发者钥匙也命中，用来验叠加顺序：先 dev，后 recall。
+    isDevkey: (text) => String(text).includes('KEY-1'),
+    searchMemory: (s, opts) => {
+      searches.push(opts)
+      return { items: [{ id: 'ev_1', day: '2026-11-09', type: 'utterance', text: memory }] }
+    },
+  })
+
+  const options = {
+    sessionId: 'sess_her',
+    system: 'BASE',
+    messages: [
+      { role: 'user', content: '外面风大。' },
+      { role: 'assistant', content: '嗯。' },
+      { role: 'user', content: '我的钥匙：KEY-1 外面风大吗？' },
+    ],
+  }
+  const seen = []
+  const next = (o) => { seen.push(o); return 'STREAM' }
+
+  assert.equal(listener(options, next), 'STREAM')
+  assert.equal(searches.length, 1)
+  assert.equal(searches[0].query, '我的钥匙：KEY-1 外面风大吗？', 'query 是清洗后的 user 文本')
+  assert.equal(searches[0].k, 5)
+  assert.equal(searches[0].budget, 800)
+  assert.ok(seen[0].system.startsWith('BASE\n\n'), '追加在 system 末尾')
+  assert.ok(seen[0].system.includes('[此刻想起]'))
+  assert.ok(seen[0].system.includes(memory), '记忆原文进来')
+  assert.ok(seen[0].system.includes(DEV_PROMPT), '原有的开发者提示照在')
+  assert.ok(
+    seen[0].system.indexOf(DEV_PROMPT) < seen[0].system.indexOf('[此刻想起]'),
+    '叠加顺序：先 dev，后 recall',
+  )
+  assert.equal(seen[0].messages, options.messages, '只进 system，对话一条不加')
+  assert.equal(options.system, 'BASE', '原 options 不被改')
+  assert.equal(dispose.info.recallInjected, 1)
+  assert.equal(store.calls.filter((e) => e.type === 'heard').length, 1, 'heard 照记')
+  dispose()
+})
+
+test('attach 此刻想起：检索没结果 → 不出现该段、计数不变', () => {
+  const searches = []
+  const { listener, dispose } = setupChat({
+    isHerSession: () => true,
+    searchMemory: (s, opts) => {
+      searches.push(opts)
+      return { items: [] }
+    },
+  })
+
+  const options = { system: 'BASE', messages: [{ role: 'user', content: '今天吃什么' }] }
+  const calls = []
+  const next = (...args) => { calls.push(args); return 'STREAM' }
+
+  assert.equal(listener(options, next), 'STREAM')
+  assert.equal(searches.length, 1, '检索跑了，只是没结果')
+  assert.deepEqual(calls, [[]], '没注入就原样 next()')
+  assert.equal(options.system, 'BASE')
+  assert.equal(dispose.info.recallInjected, 0)
+  dispose()
+})
+
+test('attach 此刻想起：不是她的会话 → 不检索、system 原样', () => {
+  let searched = 0
+  const { listener, dispose } = setupChat({
+    isHerSession: () => false,
+    searchMemory: () => {
+      searched++
+      return { items: [{ text: '不该被想起来' }] }
+    },
+  })
+
+  const options = {
+    sessionId: 'sess_coder',
+    system: 'BASE',
+    messages: [{ role: 'user', content: '写个函数' }],
+  }
+  const calls = []
+  const next = (...args) => { calls.push(args); return 'STREAM' }
+
+  assert.equal(listener(options, next), 'STREAM')
+  assert.equal(searched, 0, '别的会话一次都不检索')
+  assert.deepEqual(calls, [[]], 'system 一个字都不动')
+  assert.equal(options.system, 'BASE')
+  assert.equal(dispose.info.recallInjected, 0)
+  dispose()
+})
+
+test('attach 此刻想起：记忆超过 800 字 → 截断、标题还在、不炸', () => {
+  // 每条 1000 字 × 8 条：远超 800；注入只能取 top 5、单条 120、整段 ≤800。
+  const items = Array.from({ length: 8 }, (_, i) => ({ text: `${i}${'很长的记忆'.repeat(200)}` }))
+  const { listener, dispose } = setupChat({
+    isHerSession: () => true,
+    searchMemory: () => ({ items }),
+  })
+
+  const options = { system: 'BASE', messages: [{ role: 'user', content: '你还记得吗' }] }
+  const seen = []
+  const next = (o) => { seen.push(o); return 'STREAM' }
+
+  assert.doesNotThrow(() => { listener(options, next) })
+  const block = seen[0].system.slice(seen[0].system.indexOf('[此刻想起]'))
+  assert.ok(block.startsWith('[此刻想起]'), '标记还在')
+  assert.ok(block.length <= 800, `整段 ≤800（实际 ${block.length}）`)
+  const lines = block.split('\n')
+  assert.equal(lines.length, 6, 'top 5：标题 + 5 条')
+  for (const line of lines.slice(1)) {
+    assert.ok(line.startsWith('- '))
+    assert.ok(line.length <= 122, '单条 ≤120 字（加 "- "）')
+    assert.ok(!line.includes('检索到') && !line.includes('相关度'), '不写检索/相关度这类词')
+  }
+  assert.equal(dispose.info.recallInjected, 1)
+
+  // 硬上限：把条目数和单条都放宽，整段仍然不超过 800。
+  const wide = recallBlockFrom(items, { k: items.length })
+  assert.ok(wide.startsWith('[此刻想起]'))
+  assert.ok(wide.length <= 800, `硬上限 800（实际 ${wide.length}）`)
   dispose()
 })
