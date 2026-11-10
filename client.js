@@ -14,7 +14,7 @@ window.__ModuleLoader__.load({
     const { createElement: h, useCallback, useEffect, useState } = React
 
     const NS = 'dsh-pisces'
-    const TITLE = '派希丝'
+    const TITLE = '鱼肥生双'
     const ORDER = 70
     const API = '/dsh-pisces-api'
     const FEEDBACK_KEY = 'dsh-pisces.feedback'
