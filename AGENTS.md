@@ -37,7 +37,7 @@
 2. 全量测试通过；
 3. `node tools/build-release.mjs` 生成 `dist/dsh-pisces`（50+ 文件、去钥匙、patch name 改成 `dsh-pisces`）；
 4. 发 npm：在 `dist/dsh-pisces` 里 `npm publish --access public`；
-5. 同步 `release-repo` 并推 GitHub（源码版 `release=false`，保留 devkey）。
+5. 同步 `release-repo` 并推 GitHub（源码版 `release=false`，保留 devkey）。**release-repo 的 `cordis.patch.yml` 里 `name:` 要写成 `dsh-pisces`（跟包名一致），不是 `dsh-pisces-core`**——写错的话从 GitHub 装会整条不激活（n81）。
 
 ## 不要做
 
