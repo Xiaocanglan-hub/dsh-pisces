@@ -189,3 +189,27 @@ test('遮罩：level < 2 只藏数字，心意（tier/label/nextAt）照给', ()
   // 不遮时也带 masked:false，面板据此判断。
   assert.deepEqual(maskAffinity(aff, Infinity), { ...aff, masked: false })
 })
+
+test('重复型加分封顶：100 条 utterance 只算 15，100 条 heard 只算 20', () => {
+  const many = [
+    ...Array.from({ length: 100 }, (_, i) => ev({ id: `ev_u${i}`, type: 'utterance', text: '她说。' })),
+    ...Array.from({ length: 100 }, (_, i) => ev({ id: `ev_h${i}`, type: 'heard', text: '他说。' })),
+  ]
+  const a = computeAffinity({ events: many, now: NOW })
+  // 10 + 15（utterance 上限）+ 20（heard 上限）= 45；不封顶会是 10 + 50 + 150 = 210
+  assert.equal(a.earned, 35)
+  assert.equal(a.value, 45)
+  assert.equal(a.tier, 2)
+})
+
+test('一次灌进几百条不会把好感顶到 100（旧鱼迁移的回归）', () => {
+  const bulk = [
+    { id: 'ev_seed', type: 'seed', text: '起点。' },
+    ...Array.from({ length: 290 }, (_, i) => ev({ id: `ev_mu${i}`, type: 'utterance', text: '她说过。' })),
+    ...Array.from({ length: 13 }, (_, i) => ev({ id: `ev_mh${i}`, type: 'heard', text: '他说过。' })),
+    ...Array.from({ length: 2 }, (_, i) => ev({ id: `ev_md${i}`, type: 'diary', text: '日记。' })),
+  ]
+  const a = computeAffinity({ events: bulk, now: NOW })
+  assert.ok(a.value < 60, `好感不该到依赖档：${a.value}`)
+  assert.notEqual(a.label, '离不开')
+})
