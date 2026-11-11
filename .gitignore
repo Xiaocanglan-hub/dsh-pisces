@@ -1,3 +1,21 @@
-﻿node_modules/
+node_modules/
 dist/
 *.tgz
+
+# 本机数据与凭据：她的东西永远不进仓库（2026-11-11）
+.env
+.env.*
+owner.json
+owner.json.bak
+baidu.json
+voice.json
+devkey.json
+settings.json
+home.json
+persona-fixed.md
+persona-fixed.bak.md
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+data/
