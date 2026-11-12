@@ -424,7 +424,7 @@ test('/seed GET：没起点时成年鱼可领；有起点时 available:false、c
   assert.deepEqual(empty.biases.map((b) => b.id), ['balanced', 'rational', 'intuitive'])
   assert.deepEqual(empty.adult, {
     name: '派希丝',
-    label: '我是啥也不懂的新手小白，但是我真的喜欢，并且想养大肥鱼',
+    label: '领养姐姐派希丝',
     available: true,
   })
 
@@ -576,10 +576,10 @@ test('page()：script 能被 new Function 解析；只有 radio + 一个 textare
   assert.doesNotThrow(() => new Function(scripts[0]))
 
   const inputs = [...html.matchAll(/<input\b[^>]*>/g)].map((m) => m[0])
-  assert.equal(inputs.length, 4)
-  for (const tag of inputs) assert.match(tag, /type="radio"/)
+  assert.equal(inputs.length, 8)
+  for (const tag of inputs) assert.match(tag, /type="(radio|checkbox)"/)
   assert.equal((html.match(/<textarea\b/g) || []).length, 1)
-  assert.doesNotMatch(html, /type="(text|number|range|hidden|search|email|password|checkbox)"/)
+  assert.doesNotMatch(html, /type="(text|number|range|hidden|search|email|password)"/)
 
   for (const text of [
     '养鱼新手不要调整，默认就行',
@@ -587,7 +587,7 @@ test('page()：script 能被 new Function 解析；只有 radio + 一个 textare
     '只读面板：没有改人格、改记忆、编辑事件的入口',
     'startMode',
     'adultBox',
-    '我是啥也不懂的新手小白，但是我真的喜欢，并且想养大肥鱼',
+    '领养姐姐派希丝',
     '派希丝',
     '领养这条成年鱼',
     '她最近说的话',

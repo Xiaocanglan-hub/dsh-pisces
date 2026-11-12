@@ -29,7 +29,7 @@ test('persona day：没有 seed 写"刚开始存在"，有 seed 按天数算', a
   assert.equal(sec(r1, 'day').text, '你刚开始存在')
   assert.equal(sec(r1, 'day').order, 8500)
   assert.equal(r1.coldStart, true)
-  assert.deepEqual(r1.sections.map((s) => s.name), ['pisces:day'])
+  assert.deepEqual(r1.sections.map((s) => s.name), ['pisces:relation', 'pisces:day'])
   a.close()
 
   const b = await mkStore([{ type: 'seed', text: '你不是助手。', ts: NOW - 3 * DAY }])
@@ -191,11 +191,11 @@ test('persona 冷启动：self/mode/learned/observed 合计不超过三行', asy
   grown.close()
 })
 
-test('persona 空输入：只挂 day 段，不产生空段', () => {
+test('persona 空输入：relation + day 两段，不产生空段', () => {
   const r = buildSections({ now: NOW })
-  assert.deepEqual(r.sections.map((s) => s.name), ['pisces:day'])
+  assert.deepEqual(r.sections.map((s) => s.name), ['pisces:relation', 'pisces:day'])
   assert.ok(r.sections.every((s) => s.text.trim().length > 0))
-  assert.equal(r.lines.length, 1)
+  assert.equal(r.lines.length, 4)
   assert.equal(r.coldStart, true)
 
   const r2 = buildSections({
@@ -204,7 +204,7 @@ test('persona 空输入：只挂 day 段，不产生空段', () => {
     observed: [{ hypothesis: '只有假设' }],
     now: NOW,
   })
-  assert.deepEqual(r2.sections.map((s) => s.name), ['pisces:day'])
+  assert.deepEqual(r2.sections.map((s) => s.name), ['pisces:relation', 'pisces:day'])
 })
 
 test('persona observe：只给主人看的概览，字段齐全且不抛', async () => {

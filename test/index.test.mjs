@@ -342,7 +342,7 @@ test('index：空库 seed() 可写、成年鱼入口 available；写完不可再
     assert.deepEqual(empty.limits, { fragments: 3, fragment: 200, total: 500 })
     assert.deepEqual(empty.biases.map((b) => b.id), ['balanced', 'rational', 'intuitive'])
     // 契约里叫 demo；面板/console 侧叫 adult，两个都给。
-    assert.deepEqual(empty.demo, { name: '派希丝', label: '我是啥也不懂的新手小白，但是我真的喜欢，并且想养大肥鱼' })
+    assert.deepEqual(empty.demo, { name: '派希丝', label: '领养姐姐派希丝' })
     assert.equal(empty.adult.available, true)
 
     const w = await svc.writeSeed(['她很安静。', '喜欢看窗外。'], 'intuitive')
@@ -414,7 +414,7 @@ test('index 成年鱼：空库领养成功（事件 ≥90、demo:true），第�
     assert.equal(r.demo, true)
     assert.ok(r.events >= 90, `领养后事件数应该 ≥90，实际 ${r.events}`)
     assert.equal(r.name, '派希丝')
-    assert.ok(String(r.label).includes('想养大肥鱼'))
+    assert.ok(String(r.label).includes('领养姐姐派希丝'))
 
     const again = await svc.adopt()
     assert.equal(again.ok, false)
@@ -440,7 +440,7 @@ test('index 成年鱼：demoInfo 领养前 demo:false，领养后 demo:true / �
     assert.equal(after.ok, true)
     assert.equal(after.demo, true)
     assert.equal(after.name, '派希丝')
-    assert.ok(String(after.label).includes('想养大肥鱼'))
+    assert.ok(String(after.label).includes('领养姐姐派希丝'))
     dispose()
   })
 })
@@ -912,7 +912,7 @@ test('index：state() 带 demo 字段（空库 null，领养后是派希丝）',
     const after = await svc.state()
     assert.deepEqual(after.demo, {
       name: '派希丝',
-      label: '我是啥也不懂的新手小白，但是我真的喜欢，并且想养大肥鱼',
+      label: '领养姐姐派希丝',
     })
     dispose()
   })

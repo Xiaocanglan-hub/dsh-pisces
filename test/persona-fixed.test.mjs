@@ -67,12 +67,14 @@ test('persona 固定段：先认群体「大肥鱼」再认名字「派希丝」
   store.close()
 })
 
-test('persona 固定段：普通鱼的提示词里连「大肥鱼」都不出现', async () => {
+test('persona 固定段：普通鱼不挂固定段；只在关系段提「派希丝」', async () => {
   const store = await mkStore([{ type: 'seed', text: '起点。', ts: NOW - 2 * DAY }])
   for (const args of [{}, { demo: false }]) {
     const r = buildSections({ store, now: NOW, ...args })
     assert.equal(r.lines.some((l) => l.includes('大肥鱼')), false)
-    assert.equal(r.lines.some((l) => l.includes('派希丝')), false)
+    assert.equal(r.sections.some((s) => s.name === 'pisces:fixed'), false)
+    const relation = r.sections.find((s) => s.name === 'pisces:relation')
+    assert.ok(relation && relation.text.includes('派希丝是你姐姐'))
   }
   store.close()
 })

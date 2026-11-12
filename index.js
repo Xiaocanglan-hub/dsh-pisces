@@ -51,6 +51,14 @@ import { adoptAdult, demoLabel, demoName, isDemo } from './lib/adopt.js'
 import { nicknameOf, setNickname as writeNickname } from './lib/nickname.js'
 import { clearFixedOverride, readFixedOverride, writeFixedOverride } from './lib/personafile.js'
 import { ensureHomeWithRetry, HOME_FILE } from './lib/home.js'
+import { createRoomRuntime } from './lib/room-runtime.js'
+import { readSetup, writeSetup } from './lib/setup-file.js'
+import { planSetup } from './lib/setup-choice.js'
+import { migrateSetup } from './lib/setup-migrate.js'
+import { openPiscesBank, recordRoomInBank } from './lib/pisces-bank.js'
+import { attachPiscesSolo, ensurePiscesHome } from './lib/pisces-home.js'
+import { relationLines } from './lib/relation.js'
+import { WELCOME } from './lib/welcome.js'
 import { SCHEMA as SETTINGS_SCHEMA, mergeConfig, publicSettings, readSettings, writeSettings } from './lib/settings.js'
 import { clearBili, hot, loginBili, readBili } from './lib/bili.js'
 import { createQrLogin } from './lib/biliqr.js'
@@ -242,6 +250,9 @@ export function apply(ctx, config = {}) {
   let closed = false
   let disposed = false
   let store = null
+  let piscesBank = null
+  let piscesHome = null
+  let piscesSoloOff = null
   let opening = null
   let mindInst = null
   let nightlyInst = null
@@ -303,6 +314,53 @@ export function apply(ctx, config = {}) {
     const s = await ready
     if (s && (typeof s.isOpen !== 'function' || s.isOpen())) return s
     return ensureLive()
+  }
+
+  /** 选项 3 一同成长=是：按需打开第二个派希丝库。只在她那条线有写入时用。 */
+  async function ensurePiscesBank() {
+    if (piscesBank) return piscesBank
+    const setup = readSetup(root)
+    if (!setup || setup.together !== true) return null
+    piscesBank = await openPiscesBank(root, { log })
+    log(`派希丝库已开：${piscesBank.root || 'banks/pisces'}`)
+    return piscesBank
+  }
+
+  /** 派希丝自己的家：第二个工作区 + 会话；只在 together=true 时建。 */
+  async function ensurePiscesHomeOnce() {
+    if (piscesHome?.ok) return piscesHome
+    const setup = readSetup(root)
+    if (!setup || setup.together !== true) return null
+    const homeCfg = cfg.home && typeof cfg.home === 'object' ? cfg.home : {}
+    try {
+      piscesHome = await ensurePiscesHome({
+        ctx: safeCtx,
+        root,
+        log,
+        retryMs: homeCfg.retryMs,
+        max: homeCfg.max,
+        wait: homeCfg.wait,
+      })
+    } catch (e) {
+      return { ok: false, reason: errText(e) }
+    }
+    if (piscesHome?.ok && !piscesSoloOff) {
+      try {
+        await ensurePiscesBank()
+        piscesSoloOff = attachPiscesSolo({
+          ctx: safeCtx,
+          root,
+          home: piscesHome,
+          getBank: () => ensurePiscesBank(),
+          config: cfg,
+          log,
+        })
+        log(`派希丝的单独家已挂上：${piscesHome.workspaceTitle} / ${piscesHome.sessionTitle}`)
+      } catch (e) {
+        log(`派希丝的单独家挂载失败：${errText(e)}`)
+      }
+    }
+    return piscesHome
   }
 
   // 启动：createStore 之后先看 closed，停用过的实例把刚建好的库回收掉（n5）。
@@ -548,6 +606,114 @@ export function apply(ctx, config = {}) {
   /** 事件流里的成年鱼标记 → {name,label}|null。只认 meta.kind='demo'，不看配置。 */
   function demoOf(events) {
     return isDemo(events) ? { name: demoName(events), label: demoLabel(events) } : null
+  }
+
+  /**
+   * 开局三选项：只选一次。1 会顺手领养成年鱼；2/3 先写 setup，起点由页面继续写。
+   * 不改已存在的 setup；不自动回填/伪造普通鱼事件。
+   */
+  async function setupStart({ mode = 'pisces', together = false } = {}) {
+    const existing = readSetup(root)
+    if (existing) return { ok: false, reason: '开局已经选过了，不能改', setup: existing }
+    const s = await live()
+    if (!s) return notReady()
+    let events = []
+    try {
+      events = s.readAll() || []
+    } catch {
+      events = []
+    }
+    const plan = planSetup({
+      mode,
+      together,
+      hasSetup: false,
+      hasSeed: !!seedOf(events),
+      hasDemo: isDemo(events),
+    })
+    if (!plan.ok) return plan
+    if (plan.actions.includes('adopt')) {
+      const r = await adopt()
+      if (!r?.ok) return r
+    }
+    try {
+      writeSetup(root, plan.setup)
+    } catch (e) {
+      return { ok: false, reason: `setup 写不进去：${errText(e)}` }
+    }
+    // 单独姐姐/妹妹：开场存一条 welcome 事件，供面板/工具回看；客厅 3 连不存。
+    if (mode === 'pisces' || mode === 'sister') {
+      try {
+        const text = mode === 'pisces' ? WELCOME.pisces : WELCOME.option2
+        await s.append({
+          type: 'welcome',
+          source: 'agent',
+          text,
+          meta: { kind: 'welcome', scope: 'solo', setupMode: mode },
+        })
+      } catch (e) {
+        log(`welcome 事件没写进去：${errText(e)}`)
+      }
+    }
+    // 一同成长=是：建第二个派希丝库；失败只 warning，不把 setup 回滚。
+    let bankError = ''
+    if (plan.needsPiscesBank) {
+      try {
+        await ensurePiscesBank()
+        const h = await ensurePiscesHomeOnce()
+        if (h && h.ok === false) bankError = String(h.reason || '第二库/第二条会话没建好')
+      } catch (e) {
+        bankError = errText(e)
+        log(`派希丝库/家没开成：${bankError}`)
+      }
+    }
+    return {
+      ok: true,
+      setup: plan.setup,
+      actions: plan.actions,
+      needsPiscesBank: plan.needsPiscesBank,
+      ...(plan.needsPiscesBank
+        ? { warning: bankError ? `一同成长：第二个库没开成（${bankError}）` : '一同成长：两个库已建好' }
+        : {}),
+    }
+  }
+
+  async function setupInfo() {
+    const current = readSetup(root)
+    if (current) return { ok: true, setup: current, migrated: false }
+    const s = await live()
+    if (!s) return { ok: true, setup: null, migrated: false }
+    try {
+      const r = migrateSetup({
+        root,
+        events: s.readAll() || [],
+        read: readSetup,
+        write: writeSetup,
+      })
+      if (r.migrated) log('开局：按现有鱼补了 setup.json')
+      return { ok: true, setup: r.setup, migrated: r.migrated }
+    } catch (e) {
+      log(`开局迁移失败：${errText(e)}`)
+      return { ok: true, setup: null, migrated: false }
+    }
+  }
+
+  /** 单独派希丝/妹妹的开场：读最后一条 welcome 事件；没有就 null。 */
+  async function welcomeInfo() {
+    const s = await live()
+    if (!s) return notReady()
+    let events = []
+    try {
+      events = s.readAll() || []
+    } catch {
+      events = []
+    }
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i]
+      if (e?.type === 'welcome' && e?.meta?.kind === 'welcome') {
+        return { ok: true, text: String(e.text || ''), at: Number(e.ts) || null }
+      }
+    }
+    return { ok: true, text: null, at: null }
   }
 
   async function demoInfo() {
@@ -1245,6 +1411,9 @@ export function apply(ctx, config = {}) {
     seed,
     writeSeed,
     adopt,
+    setup: setupStart,
+    setupInfo,
+    welcome: welcomeInfo,
     demoInfo,
     nickname,
     setNickname,
@@ -1524,6 +1693,72 @@ export function apply(ctx, config = {}) {
         return false
       }
     }
+
+    // 客厅：只在她屋里那条会话里接管；room.enabled 默认 false。
+    // 没有 setup.json 就不接（开局三选项还没选），普通家会话照旧。
+    let roomRuntime = null
+    if (cfg.room?.enabled === true) {
+      try {
+        const setup = readSetup(root)
+        if (!setup) {
+          log('客厅：没有 setup.json，先不接')
+        } else if (!safeCtx.llm || typeof safeCtx.llm.stream !== 'function') {
+          log('客厅：宿主没有 llm.stream，跳过')
+        } else {
+          const piscesRoomSystem = () => [
+            FIXED_PERSONA,
+            relationLines({ demo: true }).join('\n'),
+            '[客厅] 你是派希丝，是姐姐；普通鱼是妹妹。只回一句；不替妹妹说；客厅只聊天，不用工具。',
+          ].join('\n\n')
+          const fishRoomSystem = () => {
+            if (!store) return ''
+            try {
+              const events = store.readAll?.() || []
+              const nickname = nicknameOf(events)?.name ?? null
+              const built = buildSections({
+                store,
+                config: cfg.mind || {},
+                now: Date.now(),
+                demo: false,
+                nickname,
+                fixedText: null,
+              })
+              return (built?.sections || [])
+                .map((sec) => (typeof sec.text === 'function' ? sec.text() : sec.text))
+                .filter(Boolean)
+                .join('\n\n')
+            } catch (e) {
+              log(`客厅：组装普通鱼提示词失败（${errText(e)}）`)
+              return ''
+            }
+          }
+          roomRuntime = createRoomRuntime({
+            llm: safeCtx.llm,
+            getSetup: () => readSetup(root),
+            saveSetup: (next) => writeSetup(root, next),
+            getStore: () => store,
+            fishSystem: fishRoomSystem,
+            piscesSystem: piscesRoomSystem,
+            onTurn: async ({ user, text, teaching }) => {
+              try {
+                const bank = await ensurePiscesBank()
+                if (!bank) return
+                const r = await recordRoomInBank(bank, { user, text, teaching })
+                if (!r.ok) log(`派希丝库没写进去：${r.reason}`)
+              } catch (e) {
+                log(`派希丝库写入失败：${errText(e)}`)
+              }
+            },
+            log,
+          })
+          log(`客厅已挂上：${setup.mode}${setup.together ? '（两库）' : ''}`)
+        }
+      } catch (e) {
+        log(`客厅：初始化失败（${errText(e)}），走普通生成`)
+        roomRuntime = null
+      }
+    }
+
     try {
       attachOff = attachToAgents(safeCtx, {
         getStore: () => live(),
@@ -1584,6 +1819,7 @@ export function apply(ctx, config = {}) {
           }
           return false
         },
+        roomRuntime,
         config: cfg,
         log,
       })
@@ -1665,6 +1901,9 @@ export function apply(ctx, config = {}) {
       seed: service.seed,
       writeSeed: service.writeSeed,
       adopt: service.adopt,
+      setup: service.setup,
+      setupInfo: service.setupInfo,
+      welcome: service.welcome,
       // 手动触发建家：观测台 POST /home 用（幂等，重试窗口内会等宿主服务）。
       home: service.home,
       learn: service.learn,
@@ -1853,8 +2092,23 @@ export function apply(ctx, config = {}) {
     consoleInjectOff = null
     const s = store
     store = null
+    const b = piscesBank
+    piscesBank = null
+    piscesHome = null
+    const solo = piscesSoloOff
+    piscesSoloOff = null
+    if (typeof solo === 'function') {
+      try { solo() } catch { /* 摘不到就算了 */ }
+    }
     mindInst = null
     nightlyInst = null
+    if (b) {
+      try {
+        b.close()
+      } catch {
+        /* 已经关了 */
+      }
+    }
     if (s) {
       try {
         s.close()
@@ -1863,6 +2117,11 @@ export function apply(ctx, config = {}) {
       }
     }
     releaseLock()
+  }
+
+  // 重启：如果开局选了“一同成长”，把派希丝的单独家/第二库接回来（幂等）。
+  if (readSetup(root)?.together === true) {
+    void ensurePiscesHomeOnce().catch((e) => log(`派希丝单独家启动失败：${errText(e)}`))
   }
 
   return dispose

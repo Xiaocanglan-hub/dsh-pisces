@@ -674,6 +674,7 @@ function setupChat({
   isHerSession = () => true,
   isDevkey,
   searchMemory,
+  roomRuntime,
 } = {}) {
   const ctx = makeCtx()
   const dispose = attachToAgents(ctx, {
@@ -684,6 +685,7 @@ function setupChat({
     isHerSession,
     isDevkey,
     searchMemory,
+    roomRuntime,
     log: () => {},
   })
   ctx.root.emit('agent/created', { agent: makeAgent() })
@@ -1374,3 +1376,56 @@ test('attach 此刻想起：记忆超过 800 字 → 截断、标题还在、不
   assert.ok(wide.length <= 800, `硬上限 800（实际 ${wide.length}）`)
   dispose()
 })
+
+test('attach 客厅：roomRuntime 接管，普通输出仍落一条 utterance', async () => {
+  const roomRuntime = {
+    handle: () => (async function* () {
+      yield { type: 'text-delta', text: '【普通鱼】我在。' }
+    })(),
+  }
+  const { store, listener, dispose } = setupChat({ roomRuntime })
+  const stream = listener(
+    { sessionId: 'sess_her', messages: [{ role: 'user', content: '你好' }] },
+    () => { throw new Error('客厅接管后不该走普通生成') },
+  )
+  assert.equal(typeof stream?.[Symbol.asyncIterator], 'function')
+  const got = await collectAll(stream)
+  assert.equal(got[0].text, '【普通鱼】我在。')
+  const utterances = store.calls.filter((e) => e.type === 'utterance')
+  assert.equal(utterances.length, 1)
+  assert.equal(utterances[0].text, '【普通鱼】我在。')
+  assert.equal(store.calls.filter((e) => e.type === 'heard').length, 1)
+  dispose()
+})
+
+test('attach 客厅：__piscesNoRecord 的 welcome 不落 utterance', async () => {
+  const gen = (async function* () {
+    yield { type: 'text-delta', text: '重要提醒 1\n\n重要提醒 2\n\n重要提醒 3' }
+  })()
+  gen.__piscesNoRecord = true
+  const roomRuntime = { handle: () => gen }
+  const { store, listener, dispose } = setupChat({ roomRuntime })
+  const stream = listener(
+    { sessionId: 'sess_her', messages: [{ role: 'user', content: '进客厅' }] },
+    () => { throw new Error('不该走普通生成') },
+  )
+  const got = await collectAll(stream)
+  assert.equal(got[0].text, '重要提醒 1\n\n重要提醒 2\n\n重要提醒 3')
+  assert.equal(store.calls.filter((e) => e.type === 'utterance').length, 0)
+  assert.equal(store.calls.filter((e) => e.type === 'heard').length, 1)
+  dispose()
+})
+
+test('attach 客厅：__piscesRoom 子调用原样 next()，不递归不落库', () => {
+  const { store, listener, dispose } = setupChat()
+  const calls = []
+  const out = listener(
+    { __piscesRoom: true, sessionId: 'sess_her', messages: [{ role: 'user', content: '子调用' }] },
+    (...args) => { calls.push(args); return 'OK' },
+  )
+  assert.equal(out, 'OK')
+  assert.deepEqual(calls, [[]])
+  assert.equal(store.calls.length, 0)
+  dispose()
+})
+

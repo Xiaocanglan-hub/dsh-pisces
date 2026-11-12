@@ -7,7 +7,7 @@ const TOPICS = ['start', 'days', 'split', 'refuse', 'memory', 'card', 'dream', '
 
 test('teach：九个话题各有一句具体建议，guideFor 原样取到', () => {
   assert.equal(ADULT_NAME, '派希丝')
-  assert.equal(ADULT_LABEL, '我是啥也不懂的新手小白，但是我真的喜欢，并且想养大肥鱼')
+  assert.equal(ADULT_LABEL, '领养姐姐派希丝')
   for (const topic of TOPICS) {
     assert.equal(typeof GUIDE[topic], 'string', `${topic} 应该有一句建议`)
     assert.ok(GUIDE[topic].trim().length > 0, `${topic} 的建议不能是空话`)

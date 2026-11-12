@@ -307,7 +307,7 @@ const EMPTY_SEED = {
   ],
   adult: {
     name: '派希丝',
-    label: '我是啥也不懂的新手小白，但是我真的喜欢，并且想养大肥鱼',
+    label: '领养姐姐派希丝',
     available: true,
   },
 }
@@ -389,7 +389,7 @@ test('空库的状态页：起点区在，写的人话、上限、三个偏向�
   for (const name of ['两边都算（默认）', '先算一遍', '先凭感觉']) {
     assert.ok(text.includes(name), `偏向「${name}」没有渲染出来`)
   }
-  assert.ok(text.includes('我是啥也不懂的新手小白'), '成年鱼入口那句话没渲染出来')
+  assert.ok(text.includes('领养姐姐派希丝'), '成年鱼入口那句话没渲染出来')
 })
 
 test('成年鱼入口默认隐藏：不选中就没有领养按钮', () => {
@@ -482,7 +482,7 @@ function adultSnap(reveal) {
       refusals: 4,
       scars: 2,
       recent: [],
-      demo: { name: '派希丝', label: '我是啥也不懂的新手小白，但是我真的喜欢，并且想养大肥鱼' },
+      demo: { name: '派希丝', label: '领养姐姐派希丝' },
       reveal,
       masked: {},
     },
