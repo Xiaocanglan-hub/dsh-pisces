@@ -67,3 +67,48 @@ test('derive：被引用越多越重、越旧越轻；提示词行里没有数�
   assert.ok(lines.length >= 1)
   assert.ok(lines.every((l) => !/\d/.test(l)))
 })
+
+test('derive：同题拒绝 ≥2 次且他 insist → 升格一条立场，取最近那次原话', () => {
+  const events = [
+    ev({ id: 'ev_1', type: 'seed', text: '起点', ago: 5, source: 'system' }),
+    ev({ id: 'ev_2', type: 'refusal', text: '这件事我不替你决定。', ago: 4, day: 2 }),
+    ev({ id: 'ev_3', type: 'refusal', text: '这件事，我不替你决定。', ago: 3, day: 3 }),
+    ev({ id: 'ev_4', type: 'meta', text: 'react:ev_2:insist', ago: 3, source: 'system' }),
+  ]
+  const d = deriveSelf(events, { now: NOW })
+  assert.equal(d.stances.length, 1)
+  assert.equal(d.stances[0].count, 2)
+  assert.equal(d.stances[0].insist, true)
+  assert.equal(d.stances[0].text, '这件事，我不替你决定。')
+})
+
+test('derive：hurt 后仍拒绝才升格；accept 不升格', () => {
+  const base = [
+    ev({ id: 'ev_1', type: 'seed', text: '起点', ago: 5, source: 'system' }),
+    ev({ id: 'ev_2', type: 'refusal', text: '这件事我不替你决定。', ago: 4, day: 2 }),
+    ev({ id: 'ev_3', type: 'refusal', text: '这件事我不替你决定。', ago: 2, day: 3 }),
+  ]
+  const accepted = deriveSelf(
+    [...base, ev({ id: 'ev_4', type: 'meta', text: 'react:ev_2:accept', ago: 3, source: 'system' })],
+    { now: NOW },
+  )
+  assert.equal(accepted.stances.length, 0)
+  const hurt = deriveSelf(
+    [...base, ev({ id: 'ev_4', type: 'meta', text: 'react:ev_2:hurt', ago: 3, source: 'system' })],
+    { now: NOW },
+  )
+  assert.equal(hurt.stances.length, 1)
+})
+
+test('derive：跨两天 3 次、hurt 在最后一次也算（第 3 条规则）', () => {
+  const events = [
+    ev({ id: 'ev_1', type: 'seed', text: '起点', ago: 10, source: 'system' }),
+    ev({ id: 'ev_2', type: 'refusal', text: '这件事我不替你决定。', ago: 8, day: 3 }),
+    ev({ id: 'ev_3', type: 'refusal', text: '这件事我不替你决定。', ago: 7, day: 4 }),
+    ev({ id: 'ev_4', type: 'refusal', text: '这件事我不替你决定。', ago: 7, day: 4 }),
+    ev({ id: 'ev_5', type: 'meta', text: 'react:ev_4:hurt', ago: 7, source: 'system' }),
+  ]
+  const d = deriveSelf(events, { now: NOW })
+  assert.equal(d.stances.length, 1)
+  assert.equal(d.stances[0].days, 2)
+})

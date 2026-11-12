@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env node
+#!/usr/bin/env node
 // 打发布包：把当前工作副本复制成 <仓库>/dist/dsh-pisces，并把它改成可发布的 0.1.0。
 //
 // 口径（n74）：
@@ -81,6 +81,12 @@ for (const rel of DROP) {
   if (existsSync(full)) rmSync(full, { recursive: true, force: true })
 }
 
+// 3b. 备份文件（lib/*.bak-*）不进发布包；只带运行时。
+for (const rel of readdirSync(join(outRoot, 'lib'), { recursive: true })) {
+  const name = String(rel)
+  if (/\.bak(?:-|$)/i.test(name)) rmSync(join(outRoot, 'lib', name), { force: true })
+}
+
 // 4. 改 package.json：换名、去 private、打上 release 标记；version 沿用工作副本。
 const pkgFile = join(outRoot, 'package.json')
 let pkg
@@ -94,6 +100,13 @@ pkg.private = false
 pkg.dsh = pkg.dsh && typeof pkg.dsh === 'object' ? pkg.dsh : {}
 pkg.dsh.pisces = { ...(pkg.dsh.pisces || {}), release: true }
 writeFileSync(pkgFile, `${JSON.stringify(pkg, null, 2)}\n`, 'utf8')
+
+// 4a. lib/version.js 跟 package.json 对齐（只给观测台/日志看）。
+writeFileSync(
+  join(outRoot, 'lib', 'version.js'),
+  `// 包版本：只给观测台/日志用，不参与任何判定。\nexport const VERSION = '${pkg.version}'\n`,
+  'utf8',
+)
 
 // 4b. cordis.patch.yml 里的 name 必须跟包名一致，否则宿主按 name 解析不到模块、整条插件不激活
 //（0.1.0 冒烟就是这么挂的：包名改成 dsh-pisces，patch 还写着 dsh-pisces-core）。
@@ -110,6 +123,7 @@ if (existsSync(join(outRoot, 'persona-fixed.md'))) fail('persona-fixed.md 不该
 if (!existsSync(join(outRoot, 'assets', 'adult-fish.soul.json'))) fail('缺 assets/adult-fish.soul.json')
 if (pkg.dsh.pisces.release !== true) fail('package.json 的 dsh.pisces.release 不是 true')
 if (JSON.stringify(pkg).includes('devkey')) fail('package.json 里不该出现 devkey')
+if (walk(outRoot).some((f) => /\.bak(?:-|$)/i.test(f.path))) fail('发布包里还有 .bak 备份')
 
 // 6. 打印产物清单与总大小。
 const manifest = walk(outRoot).sort((a, b) => a.path.localeCompare(b.path))

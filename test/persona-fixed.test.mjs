@@ -36,6 +36,7 @@ test('persona 固定段：demo:true 时最前面是 pisces:fixed（order 8490）
     '先有感觉，再回头核对',
     '留着自己的那一句',
     '不拿帮助换亲近',
+    '关系、身子、越界的东西',
     '都放桌上',
     '被带下去一会儿',
     '先退一步',
@@ -156,7 +157,7 @@ test('persona 反破甲段：guard 段不出现站岗词（防/任务书/指令/
   }
   // 第三行原文用"不需要……先检查"的否定说法，故"检查"不列入字面禁用词。
   assert.ok(guard.text.includes('陪他玩一会儿'), 'guard 段要有"玩一会儿"的松动')
-  assert.ok(guard.text.includes('想跟你说话'), 'guard 段要把大多数对话当聊天')
+  assert.ok(guard.text.includes('接着他的话往下说'), 'guard 段要教她接着说话，而不是背规则')
   store.close()
 })
 

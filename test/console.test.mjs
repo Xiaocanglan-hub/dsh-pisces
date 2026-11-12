@@ -132,6 +132,18 @@ test('/state：天数/事件/主导/归因/悬着/梦/核实/最近 5 条都在�
   const noDual = payload(await call('GET', '/state', undefined, { store, mind }))
   assert.equal(noDual.dual, null)
 
+  // 输出侧语料标记：有 dep 就按白名单给计数；没有就是 null。
+  assert.equal(body.style, null)
+  const withStyle = payload(
+    await call('GET', '/state', undefined, {
+      store,
+      mind,
+      dual,
+      style: () => ({ styleFlagged: 2, styleCounts: { '长句+结构': 1, '短句+盖章': 1 } }),
+    }),
+  )
+  assert.deepEqual(withStyle.style, { flagged: 2, counts: { '长句+结构': 1, '短句+盖章': 1 } })
+
   // 没库 → 503，不抛。
   const noStore = payload(await call('GET', '/state', undefined, {}))
   assert.equal(noStore.ok, false)

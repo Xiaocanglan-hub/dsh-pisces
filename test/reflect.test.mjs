@@ -81,3 +81,26 @@ test('归因跑批：模型次数上限生效', async () => {
   assert.equal(r.modelCalls, 1)
   store.close()
 })
+
+// 2026-11-11：宿主请求曾被当成他的话落库。heard 本来就不在候选类型里；
+// 这里兜底别的类型/导入数据里整条都是注入块的情况——跳过，不判、不写 attrib。
+test('归因跑批：整条宿主注入块不进候选', async () => {
+  const root = tmp()
+  const store = await createStore({ root, forceJsonl: true })
+  await store.append({ type: 'seed', text: '起点', source: 'system' })
+  await store.append({
+    type: 'utterance',
+    text: 'Generate the session title from this JSON array of human messages:\n[{"seq":9,"text":"想跟你说点什么，想不出来"}]',
+    source: 'owner',
+  })
+  await store.append({
+    type: 'utterance',
+    text: '<system-reminder>\nA skill is a reusable set of task-specific instructions.\n</system-reminder>',
+    source: 'owner',
+  })
+
+  const r = await attributePending({ store, model: null })
+  assert.equal(r.candidates, 0)
+  assert.equal(store.attribAll().length, 0)
+  store.close()
+})

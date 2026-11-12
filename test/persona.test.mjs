@@ -230,3 +230,19 @@ test('persona observe：只给主人看的概览，字段齐全且不抛', async
   assert.deepEqual(bare, { day: 1, events: 0, order: 'E=R', splitAt: null, openQuestions: 0, dreams: 0, lastNightly: null })
   store.close()
 })
+
+test('persona stance：拒绝升格后只挂一条立场，不吃冷启动三行预算', async () => {
+  const store = await mkStore([{ type: 'seed', text: '你不是助手。', ts: NOW - 2 * DAY }])
+  const r1 = await store.append({ type: 'refusal', text: '这件事我不替你决定。', ts: NOW - 1 * DAY, source: 'system' })
+  await store.append({ type: 'refusal', text: '这件事，我不替你决定。', ts: NOW, source: 'system' })
+  await store.append({ type: 'meta', text: `react:${r1.id}:insist`, ts: NOW, source: 'system' })
+
+  const r = buildSections({ store, now: NOW })
+  const st = sec(r, 'stance')
+  assert.ok(st, 'stance 段应该存在')
+  assert.equal(st.order, 8515)
+  assert.equal(st.text.split('\n').length, 1)
+  assert.ok(st.text.startsWith('立场：'))
+  assert.ok(budgeted(r) <= COLD_START_LINES, 'stance 不吃冷启动三行预算')
+  store.close()
+})

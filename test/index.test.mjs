@@ -9,7 +9,7 @@
 // - remember/recall/diary 能写能读。
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { apply, inject, name } from '../index.js'
@@ -769,6 +769,128 @@ test('index 提示词桥：home.json 的 sessionId 对上就挂；启动时读�
     })
     const gotDay = await until(() => sections.some((s) => s.name === 'pisces:day'))
     assert.equal(gotDay, true, sections.map((s) => s.name).join(','))
+    dispose()
+  })
+})
+
+test('index 聊天落库：living 下新开会话（home.json 仍是老会话）也记 heard/utterance', async () => {
+  await withHome(async (root) => {
+    // 真机形状：home.json 记的是老会话 a0f8b0c3，用户在 living 里新建会话。
+    const living = path.join(root, 'living')
+    mkdirSync(living, { recursive: true })
+    writeFileSync(
+      path.join(root, 'home.json'),
+      JSON.stringify({ sessionId: 'session-old', workspacePath: living }),
+      'utf8',
+    )
+
+    const ctx = makeCtx()
+    const dispose = apply(ctx, { home: { max: 0 } })
+    const svc = ctx.provideCalls[0][1]
+    const store = await svc.ready
+
+    // 新建会话：cwd 在 living、id 与 home.json 的老会话不同 → shouldAttach 走 cwd 判据。
+    const sections = []
+    ctx.root.emit('agent/created', {
+      agent: {
+        session: { header: { id: 'session-new', cwd: living } },
+        systemPrompt: { section: (sec) => sections.push(sec) },
+      },
+      source: 'test',
+    })
+    assert.equal(await until(() => sections.some((s) => s.name === 'pisces:day')), true)
+
+    const listener = [...(ctx.sub.map.get('llm/stream') ?? [])][0]
+    assert.equal(typeof listener, 'function', '她屋里的 agent 才装 llm/stream')
+
+    async function* stream() {
+      yield { type: 'text-delta', text: '嗯' }
+    }
+    // 真机 options 只有 sessionId、没有 cwd（agent-loop buildRequest 的形状）。
+    for await (const _ of listener(
+      { sessionId: 'session-new', messages: [{ role: 'user', content: '今天风大。' }] },
+      () => stream(),
+    )) { /* 消费完才会写 utterance */ }
+
+    assert.equal(await until(() => store.readAll().filter((e) => e.type === 'heard').length === 1), true)
+    assert.equal(await until(() => store.readAll().filter((e) => e.type === 'utterance').length === 1), true)
+    const chats = store.readAll().filter((e) => e.type === 'heard' || e.type === 'utterance')
+    assert.deepEqual(chats.map((e) => e.type), ['heard', 'utterance'])
+    assert.equal(chats[0].text, '今天风大。')
+    assert.equal(chats[1].text, '嗯')
+    dispose()
+  })
+})
+
+test('index 聊天落库：别的工作区的流仍然 streamsSkipped，不写一个字', async () => {
+  await withHome(async (root) => {
+    const living = path.join(root, 'living')
+    mkdirSync(living, { recursive: true })
+    writeFileSync(
+      path.join(root, 'home.json'),
+      JSON.stringify({ sessionId: 'session-old', workspacePath: living }),
+      'utf8',
+    )
+
+    const ctx = makeCtx()
+    const dispose = apply(ctx, { home: { max: 0 } })
+    const svc = ctx.provideCalls[0][1]
+    const store = await svc.ready
+
+    // 先让她屋里的会话把观察器装上；别的工作区的 agent 不挂段。
+    const sections = []
+    ctx.root.emit('agent/created', {
+      agent: {
+        session: { header: { id: 'session-her', cwd: living } },
+        systemPrompt: { section: (sec) => sections.push(sec) },
+      },
+      source: 'test',
+    })
+    assert.equal(await until(() => sections.some((s) => s.name === 'pisces:day')), true)
+    ctx.root.emit('agent/created', {
+      agent: {
+        session: { header: { id: 'session-coder', cwd: path.join(root, 'elsewhere') } },
+        systemPrompt: { section: () => { throw new Error('别的工作区不该挂段') } },
+      },
+      source: 'test',
+    })
+
+    const listener = [...(ctx.sub.map.get('llm/stream') ?? [])][0]
+    async function* coderStream() {
+      yield { type: 'text-delta', text: '她不该记的话' }
+    }
+    const real = coderStream()
+    const calls = []
+    const returned = listener(
+      { sessionId: 'session-coder', messages: [{ role: 'user', content: '写个函数' }] },
+      (...args) => { calls.push(args); return real },
+    )
+    assert.equal(returned, real, '别的会话的流原样交回，没包一层')
+    assert.deepEqual(calls, [[]], 'next() 不带参数、不改 options')
+    for await (const _ of returned) { /* 消费掉，确认里面没有落库副作用 */ }
+    await tick()
+    await tick()
+    assert.equal(
+      store.readAll().filter((e) => e.type === 'heard' || e.type === 'utterance').length,
+      0,
+      '别的会话一个字都不写',
+    )
+
+    // /bridge 的诊断口径：跳过的流 +1，包过的仍是 0。
+    const route = ctx.routes[0]
+    const res = { status: 0, body: '' }
+    await route.handler(
+      { method: 'GET', url: '/dsh-pisces-api/bridge' },
+      {
+        writeHead(status) { res.status = status },
+        end(chunk) { res.body += chunk == null ? '' : String(chunk) },
+      },
+    )
+    assert.equal(res.status, 200)
+    const bridge = JSON.parse(res.body).bridge
+    assert.equal(bridge.streamDebug.streamsSkipped, 1)
+    assert.equal(bridge.streamDebug.streamsWrapped, 0)
+    assert.equal(bridge.streamDebug.utterancesWritten, 0)
     dispose()
   })
 })

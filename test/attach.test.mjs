@@ -760,6 +760,23 @@ test('attach 聊天：流里的文本增量累加 → 结束后 append 一条 ut
   dispose()
 })
 
+test('attach 聊天：回复命中语料规则 → utterance.meta 只带计数，不带原文', async () => {
+  const { store, listener, dispose } = setupChat()
+
+  async function* styleStream() {
+    yield { text: '我记下了。' }
+  }
+
+  await collectAll(listener({ messages: [{ role: 'user', content: '在吗' }] }, () => styleStream()))
+  const utterances = store.calls.filter((e) => e.type === 'utterance')
+  assert.equal(utterances.length, 1)
+  assert.deepEqual(utterances[0].meta.style, { flagged: 1, counts: { '短句+盖章': 1 } })
+  assert.ok(!JSON.stringify(utterances[0].meta).includes('我记下了'), 'meta 不落原文')
+  assert.equal(dispose.info.streamDebug.styleFlagged, 1)
+  assert.deepEqual(dispose.info.streamDebug.styleCounts, { '短句+盖章': 1 })
+  dispose()
+})
+
 test('attach 聊天：回复空/全空白 → 不写 utterance', async () => {
   const { store, listener, dispose } = setupChat()
 
@@ -836,6 +853,8 @@ test('attach 聊天：宿主 text-delta 形状 → utterance 拼起来，计数�
     chunksSeen: 2,
     textParts: 2,
     utterancesWritten: 1,
+    styleFlagged: 0,
+    styleCounts: {},
     lastChunkShape: '',
   })
   dispose()
@@ -885,6 +904,25 @@ test('attach 聊天：reasoning-delta 不拼进 utterance；只有它就不写�
   assert.equal(dispose.info.chunksSeen, 1)
   assert.equal(dispose.info.lastChunkShape, 'reasoning-delta', '没认出的形状留作诊断')
   assert.equal(dispose.info.utterancesWritten, 0)
+  dispose()
+})
+
+// 2026-11-11 真机 #818：工具调用的文本被当成她的台词落库。
+// 口径：工具名、调用参数、tool_use 块都不是台词；只有真正的 text-delta 才算。
+test('attach 聊天：工具调用增量与 tool_use 块不拼进 utterance', async () => {
+  const { store, listener, dispose } = setupChat()
+  async function* stream() {
+    yield { type: 'tool-call-delta', text: '{"query":"牛肉面"}' }
+    yield { type: 'tool-call', name: 'pisces_recall', input: { query: '牛肉面' } }
+    yield { type: 'text-delta', text: '翻到了。' }
+    yield { message: { content: [{ type: 'tool_use', name: 'pisces_recall', input: { query: '牛肉面' } }] } }
+  }
+
+  await collectAll(listener({ messages: [{ role: 'user', content: '帮我翻一下' }] }, () => stream()))
+  const utterances = store.calls.filter((e) => e.type === 'utterance')
+  assert.equal(utterances.length, 1)
+  assert.equal(utterances[0].text, '翻到了。', '只留真正的文本增量')
+  assert.equal(store.calls.filter((e) => e.type === 'heard').length, 1)
   dispose()
 })
 
@@ -1037,6 +1075,84 @@ test('attach 聊天清洗：available_skills 与「这个文件属于」注入�
   listener({ messages: [{ role: 'user', content }] }, () => 'OK')
   assert.equal(store.calls.length, 1)
   assert.equal(store.calls[0].text, '把窗户关上。')
+  dispose()
+})
+
+// ---- 2026-11-11 真机：两种宿主请求被当成 heard 落库 ----
+// 「Generate the session title from this JSON array of human messages:」与
+// `<system-reminder> A skill is a reusable set…`。写入时就该剥干净。
+
+test('attach 聊天清洗：<system-reminder> 技能块整条 → 不写 heard', () => {
+  const { store, listener, dispose } = setupChat()
+  const onlyReminder = [
+    '<system-reminder>',
+    'A skill is a reusable set of task-specific instructions. The following skills are available in this session:',
+    '- office: 处理 Office 文档',
+    '</system-reminder>',
+  ].join('\n')
+
+  assert.equal(listener({ messages: [{ role: 'user', content: onlyReminder }] }, () => 'STREAM'), 'STREAM')
+  assert.equal(store.calls.length, 0, '整条都是注入块，不落库')
+  dispose()
+})
+
+test('attach 聊天清洗：会话标题生成请求整条 → 不写 heard', () => {
+  const { store, listener, dispose } = setupChat()
+  const titlePrompt = [
+    'Generate the session title from this JSON array of human messages:',
+    '[{"seq":9,"text":"想跟你说点什么，想不出来"}]',
+  ].join('\n')
+
+  assert.equal(listener({ messages: [{ role: 'user', content: titlePrompt }] }, () => 'STREAM'), 'STREAM')
+  assert.equal(store.calls.length, 0, '标题生成请求不是他说的话')
+  dispose()
+})
+
+test('attach 聊天清洗：他的话后面跟 system-reminder 块 → 只留他的话', () => {
+  const { store, listener, dispose } = setupChat()
+  const content = [
+    '今天风大，把窗户关上。',
+    '<system-reminder>',
+    'A skill is a reusable set of task-specific instructions.',
+    '</system-reminder>',
+  ].join('\n')
+
+  listener({ messages: [{ role: 'user', content }] }, () => 'OK')
+  assert.equal(store.calls.length, 1)
+  assert.equal(store.calls[0].text, '今天风大，把窗户关上。')
+  dispose()
+})
+
+test('attach 聊天清洗：system-reminder 块在中间 → 块后他的话照记', () => {
+  const { store, listener, dispose } = setupChat()
+  const content = [
+    '<system-reminder>',
+    'A skill is a reusable set of task-specific instructions.',
+    '</system-reminder>',
+    '把窗户关上。',
+  ].join('\n')
+
+  listener({ messages: [{ role: 'user', content }] }, () => 'OK')
+  assert.equal(store.calls.length, 1)
+  assert.equal(store.calls[0].text, '把窗户关上。')
+  dispose()
+})
+
+test('attach 聊天清洗：中文 <系统提醒> 块也被剥掉', () => {
+  const { store, listener, dispose } = setupChat()
+  const content = ['<系统提醒>', '可用技能：…', '</系统提醒>', '窗户关了。'].join('\n')
+
+  listener({ messages: [{ role: 'user', content }] }, () => 'OK')
+  assert.equal(store.calls.length, 1)
+  assert.equal(store.calls[0].text, '窗户关了。')
+  dispose()
+})
+
+test('attach 聊天清洗：普通中文短句不被误伤', () => {
+  const { store, listener, dispose } = setupChat()
+  listener({ messages: [{ role: 'user', content: '窗户关了。' }] }, () => 'OK')
+  assert.equal(store.calls.length, 1)
+  assert.equal(store.calls[0].text, '窗户关了。')
   dispose()
 })
 

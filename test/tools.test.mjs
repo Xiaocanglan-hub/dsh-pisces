@@ -262,29 +262,34 @@ test('tools：pisces_guide 不给 topic 走 nextStep（带 why），给 topic �
   assert.deepEqual(calls, [['next', undefined], ['for', 'panel']])
 })
 
-test('tools：pisces_check 原样回 check 的一行；check 抛错回 [看不出]', async () => {
+test('tools：pisces_check 没钥匙只回大概；钥匙对了才原样回 check 的一行；抛错回 [看不出]', async () => {
   const demo = { selfInspect: true, teach: true, guide: true, check: true }
   const view = async () => ({ ok: true, view: { day: 90 } })
   const ok = setup({
     demo,
     selfView: view,
     teach: async () => '一段话',
+    verifyDevkey: (k) => k === 'right-key',
     check: async () => '[她挺好] 天数 3 · 事件 5 · 问题 0 · 好感 12 · 上次整理 2026-11-09',
   })
-  const out = await reply(ok.tool('pisces_check'), {})
-  assert.match(out.text, /天数 3/)
-  assert.match(out.text, /事件 5/)
-  assert.match(out.text, /好感 12/)
+  const vague = await reply(ok.tool('pisces_check'), {})
+  assert.equal(vague.text, '[看着没大毛病] 日子照走，没出什么事')
+  assert.ok(!/天数|事件|好感/.test(vague.text), '没钥匙不给数字')
+  const passed = await reply(ok.tool('pisces_check'), { key: 'right-key' })
+  assert.match(passed.text, /天数 3/)
+  assert.match(passed.text, /事件 5/)
+  assert.match(passed.text, /好感 12/)
 
   const bad = setup({
     demo,
     selfView: view,
     teach: async () => '一段话',
+    verifyDevkey: (k) => k === 'right-key',
     check: async () => {
       throw new Error('库坏了')
     },
   })
-  assert.deepEqual(await reply(bad.tool('pisces_check'), {}), { text: '[看不出] 面板没读出来' })
+  assert.deepEqual(await reply(bad.tool('pisces_check'), { key: 'right-key' }), { text: '[看不出] 面板没读出来' })
 })
 
 test('tools：每个工具的 parameters / output 都是标准 JSON Schema，render 返回 text 块', () => {
@@ -323,7 +328,7 @@ test('tools：没有 ctx.tools.register 时返回 {ok:false}，不抛', () => {
   assert.deepEqual(registerTools({ tools: {} }, deps), { ok: false, count: 0, names: [] })
 })
 
-test('tools：成年鱼自查回执有天数/计数，但没有 dominance / 权重数字', async () => {
+test('tools：成年鱼自查默认只回大概（天数/有没有事/分流），不给计数', async () => {
   const view = {
     day: 90,
     beliefs: ['一', '二', '三'],
@@ -341,9 +346,32 @@ test('tools：成年鱼自查回执有天数/计数，但没有 dominance / 权�
     teach: async () => '一段话',
   })
   const out = await reply(tool('pisces_self'), {})
-  assert.equal(out.text, '[天 90 · 判断 3 · 拒绝 2 · 疤 1 · 分流了]')
+  assert.equal(out.text, '[天 90 · 还记着些事 · 分流了]')
+  assert.ok(!/3|2|1|判断|拒绝|疤/.test(out.text.replace('天 90', '')), '没验钥匙不给计数')
   assert.ok(!/0\.65|0\.87/.test(out.text), '不许出现 dominance / 权重数字')
   assert.ok(!/dominance|weight|权重|主导|order/i.test(out.text), '不许出现这些词')
+  assert.ok(tool('pisces_self').parameters.properties.key, '要留一个钥匙参数给验过的人')
+})
+
+test('tools：成年鱼自查验过钥匙才回计数；钥匙不对照旧只给大概', async () => {
+  const view = {
+    day: 90,
+    beliefs: ['一', '二', '三'],
+    refusals: ['a', 'b'],
+    scars: ['x'],
+    split: true,
+    dominance: 0.65,
+  }
+  const { tool } = setup({
+    demo: { selfInspect: true },
+    verifyDevkey: (key) => key === 'right-key',
+    selfView: async () => ({ ok: true, view }),
+  })
+  const withKey = await reply(tool('pisces_self'), { key: 'right-key' })
+  assert.equal(withKey.text, '[天 90 · 判断 3 · 拒绝 2 · 疤 1 · 分流了]')
+  const wrongKey = await reply(tool('pisces_self'), { key: 'nope' })
+  assert.equal(wrongKey.text, '[天 90 · 还记着些事 · 分流了]')
+  assert.ok(!/判断|拒绝|疤/.test(wrongKey.text), '钥匙不对不给计数')
 })
 
 test('tools：成年鱼 12 个含 pisces_nickname；回执 [记下了，以后我叫…] / [没改：…]', async () => {

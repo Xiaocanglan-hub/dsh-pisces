@@ -467,6 +467,23 @@ window.__ModuleLoader__.load({
           stat('openQuestions', { label: '悬着的问题', value: s.openQuestions == null ? '—' : s.openQuestions }),
           stat('dreams', { label: '梦', value: s.dreams == null ? '—' : s.dreams }),
           stat('verified', { label: '核实', value: s.verified == null ? '—' : s.verified, hint: '梦里的假设后来对上了几条' }),
+          h(Stat, {
+            label: '双流',
+            value: s.dual ? `${s.dual.mode || '—'} · 先算 ${s.dual.plans ?? 0} · 缓存 ${s.dual.cacheHits ?? 0}` : '没开',
+            hint: s.dual
+              ? `退回 ${s.dual.fallbacks ?? 0}${s.dual.seconds ? ` · 最近 ${Number(s.dual.seconds).toFixed(1)}s` : ''}`
+              : '设置页可开；改完重启',
+            small: true,
+          }),
+          h(Stat, {
+            label: '语料标记',
+            value: s.style ? `${s.style.flagged ?? 0} 条` : '—',
+            hint:
+              s.style && Object.keys(s.style.counts || {}).length
+                ? Object.entries(s.style.counts).map(([k, v]) => `${k} ${v}`).join(' · ')
+                : '新回复命中才计数；不存原文',
+            small: true,
+          }),
           rv ? stat('refusals', { label: '拒绝', value: s.refusals == null ? '—' : s.refusals, hint: '她说过"不"的事' }) : null,
           rv ? stat('scars', { label: '疤', value: s.scars == null ? '—' : s.scars, hint: '他难过之后留下的' }) : null,
           h(Stat, { label: '上次整理', value: age(last), hint: last ? when(last) : '夜间流水线还没跑过' }),

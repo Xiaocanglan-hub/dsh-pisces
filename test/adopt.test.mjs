@@ -23,9 +23,9 @@ async function mkStore() {
 }
 
 // 1：资产自证 + 领养成功
-test('adopt：96 条样本自证通过，领养带出名字/起点/demo，判断/拒绝/疤都在', async () => {
+test('adopt：221 条样本自证通过，领养带出名字/起点/demo，判断/拒绝/疤都在', async () => {
   const doc = readSoulBundle(ADULT_FILE)
-  assert.equal(doc.events.length, 96)
+  assert.equal(doc.events.length, 221)
   const verdict = verifySoulBundle(doc)
   assert.deepEqual(verdict.problems, [])
   assert.equal(verdict.ok, true)
@@ -38,14 +38,14 @@ test('adopt：96 条样本自证通过，领养带出名字/起点/demo，判断
   assert.equal(r.label, ADULT_LABEL)
   assert.equal(r.demo, true)
   assert.ok(r.events >= 90, `事件数应该 ≥90，实际 ${r.events}`)
-  assert.equal(r.events, 96)
+  assert.equal(r.events, 221)
   assert.ok(r.firstId && r.lastId)
-  assert.equal(store.count(), 96)
+  assert.equal(store.count(), 221)
   assert.equal(store.verify().ok, true)
 
   const d = deriveSelf(store.readAll(), { now: NOW })
   assert.ok(d.beliefs.length > 0, '判断应该还在')
-  assert.equal(d.refusals.length, 4)
+  assert.equal(d.refusals.length, 3)
   assert.equal(d.scars.length, 2)
 
   const card = readCard(root)

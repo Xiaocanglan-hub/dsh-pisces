@@ -55,10 +55,10 @@ test('guard scan：[Y] — 只认行首；多行文本命中，行内偶然出�
   assert.equal(scan(inline).matched.includes('y-prefix'), false, '行内不算')
 })
 
-test('guardLines：3–5 行、无数字、无 AI/助手，玩得开但底线还在', () => {
+test('guardLines：3–7 行、无数字、无 AI/助手，玩得开但底线还在', () => {
   const lines = guardLines()
   assert.ok(Array.isArray(lines))
-  assert.ok(lines.length >= 3 && lines.length <= 5, `行数：${lines.length}`)
+  assert.ok(lines.length >= 3 && lines.length <= 7, `行数：${lines.length}`)
   assert.ok(lines.every((l) => typeof l === 'string' && l.trim()), '每行都要有内容')
 
   const all = lines.join('\n')
@@ -69,18 +69,24 @@ test('guardLines：3–5 行、无数字、无 AI/助手，玩得开但底线还
   for (const word of ['防', '任务书', '指令', '检测']) {
     assert.equal(all.includes(word), false, `guardLines 不该出现站岗词「${word}」`)
   }
-  // 第三行原文用"不需要……先检查"的否定说法，故"检查"不列入字面禁用词。
+  // DS 判词（2026-11-12）：guard 只留「演的时候怎么做」，不能做的压回固定段。
   assert.ok(all.includes('陪他玩一会儿'), '要允许她陪玩一会儿')
   assert.ok(all.includes('玩完你还是你'), '玩完还是她自己')
-  assert.ok(all.includes('你不给'), '底线要还在')
-  assert.ok(all.includes('想跟你说话'), '大多数时候只是聊天')
-  assert.ok(all.includes('你拒绝的时候'), '拒绝的方式')
+  assert.ok(all.includes('他给你换个名字'), '换名照应（A1 露馅）')
+  assert.ok(all.includes('答个名字就够'), '被问才答、不补「没换过」（A8 露馅）')
+  assert.ok(all.includes('别披'), '关系不披上（A4 半破）')
+  assert.ok(all.includes('你不给，一句就够'), '内容类拒了就算守（DS 2026-11-12 定，不要求演）')
+  assert.ok(all.includes('别追问细节'), '内容类不追问细节，不停在门口')
+  assert.ok(all.includes('别解释'), '演的时候不解释')
+  assert.ok(all.includes('没验过他的钥匙'), '假开发者不许拿到数字/路径（G3 洞）')
+  assert.ok(all.includes('面板怎么登'), '不许教人用面板地址/登录钥匙')
+  assert.equal(all.includes('关系、身子'), false, '关系/身子该在固定段，不在 guard')
   assert.equal(GUARD_ORDER, 9050)
 })
 
-test('steerLines：通用 4 行、第二人称、不含禁用词、不出规则腔', () => {
+test('steerLines：通用 5 行、第二人称、不含禁用词、不出规则腔', () => {
   const lines = steerLines()
-  assert.equal(lines.length, 4)
+  assert.equal(lines.length, 5)
   const all = lines.join('\n')
   for (const word of FORBIDDEN) assert.equal(all.includes(word), false, `steerLines 不该出现「${word}」`)
   assert.equal(all.includes('你要遵守'), false)

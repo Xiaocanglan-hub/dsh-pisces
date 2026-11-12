@@ -1491,15 +1491,34 @@ export function apply(ctx, config = {}) {
         return ''
       }
     }
+    /**
+     * 她屋里开过的会话 id。宿主 llm/stream 的 options 只带 sessionId——真机
+     * buildRequest 里只有 config/messages/toolHistory/tools/sessionId/signal，
+     * 没有 cwd，所以落库判据没法从 options 反推 cwd。只能在 agent/created
+     * 判通过时把 sid 记下来；n77 的门控不放松：只记 shouldAttach 通过的会话。
+     * 只增不删，上限 200 条，超出丢最老的（最近用过的会被重新提到队尾）。
+     */
+    const herSessionIds = new Set()
+    const rememberHerSession = (sid) => {
+      if (!sid) return
+      herSessionIds.delete(sid)
+      herSessionIds.add(sid)
+      while (herSessionIds.size > 200) herSessionIds.delete(herSessionIds.values().next().value)
+    }
     const shouldAttach = (agent) => {
       try {
         const cwd = flatPath(cwdOf(agent))
         const home = flatPath(herHome)
-        if (cwd && home && (cwd === home || cwd.startsWith(`${home}/`))) return true
         const sid = sidOf(agent)
+        if (cwd && home && (cwd === home || cwd.startsWith(`${home}/`))) {
+          rememberHerSession(sid)
+          return true
+        }
         if (!sid) return false
         const saved = readHomeSessionId()
-        return Boolean(saved && sid === saved)
+        if (!saved || sid !== saved) return false
+        rememberHerSession(sid)
+        return true
       } catch {
         // 判据失败最多是不挂，不能拖垮启动。
         return false
@@ -1549,10 +1568,14 @@ export function apply(ctx, config = {}) {
             }),
         shouldAttach,
         // 聊天落库的门控：llm/stream 是全局 waterfall，别的会话的生成也会经过观察器。
-        // 只有她家里那条会话（home.json 的 sessionId）才记 heard/utterance；每次现读，
-        // 读不到 home.json → false。shouldAttach 只管挂人设段，不决定记不记事件。
+        // 只有她屋里那条会话才记 heard/utterance：home.json 的 sessionId，或 shouldAttach
+        // 通过时记下的会话 id（她家工作区里新开的会话靠这一条——宿主 options 只有
+        // sessionId、没有 cwd；key 的 cwd 分支只是宿主不给 sid 时的老兜底）。
+        // 每次现读 home.json，读不到 → 只认记下的会话。shouldAttach 只管挂人设段。
         isHerSession: (sid, key) => {
           if (sid && sid === readHomeSessionId()) return true
+          // agent/created 判通过时记下的会话：只增不删、上限 200（见 herSessionIds）。
+          if (sid && herSessionIds.has(sid)) return true
           // 宿主没给 sessionId 时 attach 会退回 cwd 当会话 key：家目录（living）下的会话也算她屋里。
           if (key && String(key).startsWith('cwd:')) {
             const cwd = flatPath(String(key).slice(4))
@@ -1598,6 +1621,8 @@ export function apply(ctx, config = {}) {
       },
       // 诊断用：提示词桥到底挂没挂上（agentsSeen/sectionsAttached/agentsNotHer…）。
       bridge: () => (attachOff?.info ?? null),
+      // 输出侧语料标记：只给计数，不给原文（n12）。
+      style: () => (attachOff?.info?.streamDebug ?? null),
       get nightly() {
         return getNightly()
       },
