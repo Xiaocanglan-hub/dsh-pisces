@@ -13,7 +13,7 @@
 // 工具面在注册时读一次事件流决定是否多挂 pisces_self / pisces_teach / pisces_guide / pisces_check；
 // 提示词桥的 buildSections 也要先判 demo 再传进去，否则普通鱼也会挂 pisces:fixed。
 import { join } from 'node:path'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { resolveRoot, paths, ensureDirs } from './lib/paths.js'
 import { acquire, release } from './lib/lock.js'
 import { createStore } from './lib/store.js'
@@ -45,7 +45,7 @@ import { importFishEvents, importFishRoot } from './lib/import.js'
 import { exportCardV2, exportSoulBundle, importSoulBundle } from './lib/export.js'
 import { PREFIX as CONSOLE_PREFIX, ADULT_LABEL, ADULT_NAME, registerConsole } from './lib/console.js'
 import { createLocalModel, probeLocalModel } from './lib/ollama.js'
-import { buildSections, devOverlayOf, FIXED_PERSONA } from './lib/persona.js'
+import { buildSections, devOverlayOf, FIXED_PERSONA, fixedPersonaFor } from './lib/persona.js'
 import { scan } from './lib/guard.js'
 import { adoptAdult, demoLabel, demoName, isDemo } from './lib/adopt.js'
 import { nicknameOf, setNickname as writeNickname } from './lib/nickname.js'
@@ -55,11 +55,18 @@ import { createRoomRuntime } from './lib/room-runtime.js'
 import { readSetup, writeSetup } from './lib/setup-file.js'
 import { planSetup } from './lib/setup-choice.js'
 import { migrateSetup } from './lib/setup-migrate.js'
-import { openPiscesBank, recordRoomInBank } from './lib/pisces-bank.js'
+import { openPiscesBank } from './lib/pisces-bank.js'
+import { appendRoomLog, absorbRoomLog } from './lib/room-log.js'
+import { createInvite, consumeInvite, pendingInvites, openTicket, readTicket, markBack, isBackText } from './lib/room-invite.js'
+import { splitRoom } from './lib/room.js'
 import { attachPiscesSolo, ensurePiscesHome } from './lib/pisces-home.js'
+import { ensureRoomHome, readRoomHome, roomHomePaths } from './lib/room-home.js'
 import { relationLines } from './lib/relation.js'
-import { WELCOME } from './lib/welcome.js'
+import { getCast, setCast } from './lib/cast.js'
+import { readCastFile } from './lib/cast-file.js'
+import { welcomeText } from './lib/welcome.js'
 import { SCHEMA as SETTINGS_SCHEMA, mergeConfig, publicSettings, readSettings, writeSettings } from './lib/settings.js'
+import { discoverPacks, pickMeme } from './lib/meme.js'
 import { clearBili, hot, loginBili, readBili } from './lib/bili.js'
 import { createQrLogin } from './lib/biliqr.js'
 import { clearBaidu, loginBaidu, readBaidu } from './lib/baidu.js'
@@ -170,6 +177,49 @@ export function apply(ctx, config = {}) {
     return () => {}
   }
 
+  // 表情包（n186）：内置包随插件走，用户包放 <root>/memes/<包>/。只读目录，出图走观测台路由。
+  const memeBuiltinDir = join(import.meta.dirname, 'assets', 'memes', 'builtin')
+  let memeCache = null
+  const memePacks = () => {
+    if (memeCache !== null) return memeCache
+    try {
+      memeCache = discoverPacks({ builtinDir: memeBuiltinDir, userDir: join(root, 'memes') })
+    } catch (e) {
+      log(`表情包读不了：${errText(e)}`)
+      memeCache = []
+    }
+    return memeCache
+  }
+  const memeRecent = []
+  const selectMeme = async ({ mood } = {}) => {
+    if (cfg.meme?.enabled === false) return null
+    let hit = null
+    try {
+      hit = pickMeme(memePacks(), { mood, recent: memeRecent.slice(-5) })
+    } catch (e) {
+      log(`挑表情失败：${errText(e)}`)
+      return null
+    }
+    if (!hit) return null
+    memeRecent.push(hit.id)
+    if (memeRecent.length > 20) memeRecent.shift()
+    // 只记计数用的 meta；记不上不影响发图。
+    try {
+      const s = await live()
+      if (s) {
+        await s.append({
+          type: 'meta',
+          text: `meme:${hit.pack}/${hit.id}`,
+          meta: { kind: 'meme', pack: hit.pack, id: hit.id },
+          source: 'tool',
+        })
+      }
+    } catch {
+      /* 记不上不影响发图 */
+    }
+    return hit
+  }
+
   // 单实例锁：拿不到也只读继续，不因为另一个实例在写就让插件不加载。
   let lockToken = null
   try {
@@ -187,6 +237,15 @@ export function apply(ctx, config = {}) {
   // 发布标记：dist/package.json 的 dsh.pisces.release === true。开发版默认 false。
   // 测试可以用 hostConfig.release=true 模拟发布包，不用改真实 package.json。
   const isRelease = readRelease() || hostConfig.release === true
+
+  // 关系 cast（n192）：本机 cast.json 只在非发布版读；发布版强制 RELEASE_CAST。
+  if (!isRelease) {
+    const cast = readCastFile(root)
+    if (cast) {
+      setCast(cast)
+      log(`关系 cast：${cast.adult.name}(${cast.adult.label}) / ${cast.ordinary.name}(${cast.ordinary.label})`)
+    }
+  }
 
   // 开发者钥匙：只在开发版加载。发布包里 lib/devkey.js 已被删掉，所以必须动态 import + try，
   // 不能让静态 import 把整个插件拖挂（n65/n74）。
@@ -252,6 +311,7 @@ export function apply(ctx, config = {}) {
   let store = null
   let piscesBank = null
   let piscesHome = null
+  let roomHome = null
   let piscesSoloOff = null
   let opening = null
   let mindInst = null
@@ -260,6 +320,8 @@ export function apply(ctx, config = {}) {
   let nightlyProbed = false
   let nightlyTimer = null
   let attachOff = null
+  let attachRoomOff = null
+  let roomInfoGetter = null
   let dualOff = null
   let consoleMount = null
   let consoleInjectOff = null
@@ -326,6 +388,36 @@ export function apply(ctx, config = {}) {
     return piscesBank
   }
 
+  /** 夜间从客厅共享日志吸收：鲸歌走主库、派希丝走第二库；各库自己的游标防重复。
+   *  role 给了就只吸那一个库（邀请码手动补吸用）。 */
+  async function absorbRoomLogs({ now = Date.now(), role = null } = {}) {
+    const main = await live()
+    const stores = []
+    if (main && (!role || role === 'ordinary')) stores.push({ store: main, role: 'ordinary' })
+    if (!role || role === 'adult') {
+      const pisces = await ensurePiscesBank()
+      if (pisces) stores.push({ store: pisces, role: 'adult' })
+    }
+    return absorbRoomLog({ root, stores, now })
+  }
+
+  /**
+   * 回家的收码人：各自家里说一句「我回来了」，就把客厅那几轮收进**她那一边**的库，
+   * 不用码。两只回家中间隔着时间也没关系：各记各的一格，**两只都回来才关门**。
+   */
+  function backAbsorber(role) {
+    return (text) => {
+      if (!isBackText(text)) return null
+      void absorbRoomLogs({ role })
+        .then((r) => log(`客厅记录已收进${role === 'adult' ? '派希丝' : '鲸歌'}的库：${r?.recorded ?? 0} 条（回家）`))
+        .catch((e) => log(`客厅记录没收进去（回家）：${errText(e)}`))
+      let back = null
+      try { back = markBack(root, role) } catch { back = null }
+      if (back?.closed) log('客厅：两只都回来了，门关上')
+      return { ok: true }
+    }
+  }
+
   /** 派希丝自己的家：第二个工作区 + 会话；只在 together=true 时建。 */
   async function ensurePiscesHomeOnce() {
     if (piscesHome?.ok) return piscesHome
@@ -352,6 +444,7 @@ export function apply(ctx, config = {}) {
           root,
           home: piscesHome,
           getBank: () => ensurePiscesBank(),
+          roomBack: backAbsorber('adult'),
           config: cfg,
           log,
         })
@@ -361,6 +454,29 @@ export function apply(ctx, config = {}) {
       }
     }
     return piscesHome
+  }
+
+  /** 客厅自己的家：第三个工作区 + 会话；只在 setup.room === true 时建。 */
+  async function ensureRoomHomeOnce() {
+    if (roomHome?.ok) return roomHome
+    const setup = readSetup(root)
+    if (!setup || setup.room !== true) return null
+    const homeCfg = cfg.home && typeof cfg.home === 'object' ? cfg.home : {}
+    try {
+      roomHome = await ensureRoomHome({
+        ctx: safeCtx,
+        root,
+        log,
+        retryMs: homeCfg.retryMs,
+        max: homeCfg.max,
+        wait: homeCfg.wait,
+      })
+    } catch (e) {
+      return { ok: false, reason: errText(e) }
+    }
+    if (roomHome?.ok) log(`客厅建好了：${roomHome.workspaceTitle} / ${roomHome.sessionTitle}`)
+    else log(`客厅没建好：${roomHome?.reason ?? '原因不明'}`)
+    return roomHome
   }
 
   // 启动：createStore 之后先看 closed，停用过的实例把刚建好的库回收掉（n5）。
@@ -643,7 +759,7 @@ export function apply(ctx, config = {}) {
     // 单独姐姐/妹妹：开场存一条 welcome 事件，供面板/工具回看；客厅 3 连不存。
     if (mode === 'pisces' || mode === 'sister') {
       try {
-        const text = mode === 'pisces' ? WELCOME.pisces : WELCOME.option2
+        const text = welcomeText(mode)
         await s.append({
           type: 'welcome',
           source: 'agent',
@@ -861,8 +977,8 @@ export function apply(ctx, config = {}) {
     return r
   }
 
-  async function state() {
-    const s = await live()
+  /** 同一套口径算一份状态；换哪个库由调用方给（主库 / 派希丝第二库）。 */
+  async function stateOf(s, md = {}) {
     if (!s) return notReady()
     const events = s.readAll() || []
     const d = deriveSelf(events)
@@ -873,7 +989,6 @@ export function apply(ctx, config = {}) {
     } catch {
       mode = null
     }
-    const md = (await getMind())?.describe?.() || {}
     const open = listQuestions(s, { status: 'open', limit: 3 })
     const openAll = listQuestions(s, { status: 'open', limit: 50 })
     const dreams = events.filter((e) => e.type === 'dream_sim' && e.meta?.status !== 'rejected')
@@ -925,7 +1040,26 @@ export function apply(ctx, config = {}) {
       dreamsRejected: dreamsRejected.length,
       verified: verified.length,
       recent,
+      // 客厅调试：只给次数/最后一条错误/llm 在不在，不碰对话正文。
+      room: typeof roomInfoGetter === 'function' ? roomInfoGetter() : null,
     }
+  }
+
+  /** 主库（鲸歌）的状态。 */
+  async function state() {
+    const s = await live()
+    if (!s) return notReady()
+    let md = {}
+    try { md = (await getMind())?.describe?.() || {} } catch { md = {} }
+    return stateOf(s, md)
+  }
+
+  /** 派希丝第二库的状态：同一套口径；这个进程里没有她的 mind 实例，分流给默认值。 */
+  async function piscesState() {
+    let b = null
+    try { b = await ensurePiscesBank() } catch { b = null }
+    if (!b) return { ok: false, reason: '没有第二库（setup.together 关着？）' }
+    return stateOf(b, {})
   }
 
   /**
@@ -1248,6 +1382,9 @@ export function apply(ctx, config = {}) {
         model,
         learn: (o) => service.learn(o),
         mind: mindInst,
+        // 客厅记录默认「完全手动」：夜里不自动吸，只认邀请码（n195）。
+        // 想恢复夜间自动吸收，把 settings 的 room.autoAbsorb 打开。
+        roomAbsorb: cfg.room?.autoAbsorb === true ? (o) => absorbRoomLogs(o) : null,
       })
       // 只读快照，给测试/面板看这次夜间用的是哪个模型（不是 nightly 契约的一部分）。
       try {
@@ -1426,6 +1563,8 @@ export function apply(ctx, config = {}) {
     learn,
     verify,
     state,
+    // 派希丝第二库的同一份状态（面板「看谁」切换用）。
+    piscesState,
     derive,
     exportCard,
     exportSoul,
@@ -1550,6 +1689,9 @@ export function apply(ctx, config = {}) {
               }
             : null,
         }
+
+        // 表情包：关掉就不注册这个动作（和 look/speak 一样，缺依赖就少一个工具）。
+        if (cfg.meme?.enabled !== false) toolDeps.selectMeme = (o) => selectMeme(o)
 
         // 开发者依赖只在开发版注入；发布包里这几个键一个都不出现（n74）。
         if (!isRelease) {
@@ -1702,14 +1844,41 @@ export function apply(ctx, config = {}) {
         const setup = readSetup(root)
         if (!setup) {
           log('客厅：没有 setup.json，先不接')
-        } else if (!safeCtx.llm || typeof safeCtx.llm.stream !== 'function') {
-          log('客厅：宿主没有 llm.stream，跳过')
         } else {
-          const piscesRoomSystem = () => [
-            FIXED_PERSONA,
-            relationLines({ demo: true }).join('\n'),
-            '[客厅] 你是派希丝，是姐姐；普通鱼是妹妹。只回一句；不替妹妹说；客厅只聊天，不用工具。',
-          ].join('\n\n')
+          // 根 ctx 未必直接有 llm；双流也是 inject(['llm']) 才拿到。
+          // 先拿/注入；拿到之前也把 3 连挂上，正常回合等 llm 到了再走。
+          let roomLlm = null
+          const pickLlm = (c) => {
+            try {
+              const l = c?.llm ?? (typeof c?.get === 'function' ? c.get('llm') : null)
+              if (l && typeof l.stream === 'function') roomLlm = l
+            } catch {
+              /* 探测失败：继续等注入 */
+            }
+            return roomLlm
+          }
+          pickLlm(safeCtx)
+          if (!roomLlm && typeof safeCtx.inject === 'function') {
+            try {
+              safeCtx.inject(['llm'], (sub) => {
+                if (!pickLlm(sub)) log('客厅：注入的 llm 没有 stream')
+                // 必须把 disposer 交回去：返回 undefined 会让注入的子 ctx 当场被回收，
+                // 之后 llm.stream 只剩空流（就是“连上了但没人说话”的那个样子）。
+                return () => {}
+              })
+            } catch (e) {
+              log(`客厅：取 llm 失败（${errText(e)}）`)
+            }
+          }
+          if (!roomLlm) log('客厅：llm 还没就绪，先挂欢迎；正常回合等 llm 到了再走')
+          const piscesRoomSystem = () => {
+            const { adult, ordinary } = getCast()
+            return [
+              fixedPersonaFor({ adult, ordinary }),
+              relationLines({ demo: true }),
+              `[客厅] 你是${adult.label}，${ordinary.name}是你${ordinary.label}。只回一句；不替${ordinary.label}说；客厅只聊天，不用工具。`,
+            ].join('\n\n')
+          }
           const fishRoomSystem = () => {
             if (!store) return ''
             try {
@@ -1726,6 +1895,13 @@ export function apply(ctx, config = {}) {
               return (built?.sections || [])
                 .map((sec) => (typeof sec.text === 'function' ? sec.text() : sec.text))
                 .filter(Boolean)
+                .concat([
+                  // 客厅里的名字说明：她的妹妹在客厅叫「鲸漪」（同一个人的本名是派希丝）。
+                  (() => {
+                    const { adult, ordinary } = getCast()
+                    return `[客厅] 你妹妹在客厅里叫${adult.name}；你是${ordinary.name}（${ordinary.label}）。只回一句，客厅只聊天，不用工具。`
+                  })(),
+                ])
                 .join('\n\n')
             } catch (e) {
               log(`客厅：组装普通鱼提示词失败（${errText(e)}）`)
@@ -1733,25 +1909,39 @@ export function apply(ctx, config = {}) {
             }
           }
           roomRuntime = createRoomRuntime({
-            llm: safeCtx.llm,
+            getLlm: () => roomLlm,
             getSetup: () => readSetup(root),
             saveSetup: (next) => writeSetup(root, next),
             getStore: () => store,
+            // 门票：去客厅要通行码（贴进客厅即开门 90 分钟）；回来说一声就行。
+            roomTicket: {
+              consume: (text) => Boolean(consumeInvite(root, text, { role: 'room' })),
+              open: () => openTicket(root),
+              active: () => Boolean(readTicket(root)),
+            },
+            // 卡在哪一步要落盘：宿主整个卡死时 /state 读不到、重启后计数又清零，
+            // 只有这行文件能事后看（只写阶段/时长/错误，不写正文）。
+            writeTrace: (patch) => {
+              try {
+                writeFileSync(join(root, 'room', 'last-turn.json'), `${JSON.stringify(patch)}\n`)
+              } catch {
+                /* 留痕失败不影响客厅 */
+              }
+            },
             fishSystem: fishRoomSystem,
             piscesSystem: piscesRoomSystem,
             onTurn: async ({ user, text, teaching }) => {
               try {
-                const bank = await ensurePiscesBank()
-                if (!bank) return
-                const r = await recordRoomInBank(bank, { user, text, teaching })
-                if (!r.ok) log(`派希丝库没写进去：${r.reason}`)
+                const { fish, pisces } = splitRoom(text)
+                appendRoomLog(root, { user, fish, pisces, teaching: teaching?.id ?? null })
               } catch (e) {
-                log(`派希丝库写入失败：${errText(e)}`)
+                log(`客厅日志没写进去：${errText(e)}`)
               }
             },
             log,
           })
           log(`客厅已挂上：${setup.mode}${setup.together ? '（两库）' : ''}`)
+          roomInfoGetter = () => roomRuntime?.info?.() ?? null
         }
       } catch (e) {
         log(`客厅：初始化失败（${errText(e)}），走普通生成`)
@@ -1760,47 +1950,47 @@ export function apply(ctx, config = {}) {
     }
 
     try {
+      // 人设段：鲸歌家和客厅共用；每轮现读事件流判 demo / 昵称 / 固定段覆盖。
+      const buildSectionsForHer = (args = {}) => {
+        let demo = false
+        let nickname = null
+        let devOverlay = null
+        let fixedText = null
+        try {
+          const events = args?.store?.readAll?.() || []
+          demo = isDemo(events)
+          nickname = nicknameOf(events)?.name ?? null
+          // 开发者钥匙改出来的人设：最后一条 dev-persona，文本为 null 就是清空了。
+          // 发布版没有钥匙，事件流里残留的 dev-persona 也不挂段（n74）。
+          devOverlay = isRelease ? null : devOverlayOf(events)
+          fixedText = readFixedOverride(root)
+        } catch {
+          demo = false
+          nickname = null
+          devOverlay = null
+          fixedText = null
+        }
+        return buildSections({ ...args, demo, nickname, devOverlay, fixedText })
+      }
+      const guardDeps = cfg.guard?.enabled !== false ? { scanGuard: (text) => scan(text) } : {}
+      const devkeyDeps = isRelease
+        ? {}
+        : {
+            isDevkey: (text) => {
+              try {
+                return devkeyMod?.verifyDevkey?.(root, text) === true
+              } catch {
+                return false
+              }
+            },
+          }
+
+      // 鲸歌的家：只私聊；客厅不再挂在这里。
       attachOff = attachToAgents(safeCtx, {
         getStore: () => live(),
-        // 包装一层：persona 不读事件流判 demo，调用方先判再传，普通鱼才不会挂 pisces:fixed。
-        // 昵称也在这里现读事件流：service.setNickname 之后，下一次 attach 就生效。
-        // 固定段覆盖同理：每轮现读 <root>/persona-fixed.md，写完文件下一轮就换掉，不用重启。
-        buildSections: (args = {}) => {
-          let demo = false
-          let nickname = null
-          let devOverlay = null
-          let fixedText = null
-          try {
-            const events = args?.store?.readAll?.() || []
-            demo = isDemo(events)
-            nickname = nicknameOf(events)?.name ?? null
-            // 开发者钥匙改出来的人设：最后一条 dev-persona，文本为 null 就是清空了。
-            // 发布版没有钥匙，事件流里残留的 dev-persona 也不挂段（n74）。
-            devOverlay = isRelease ? null : devOverlayOf(events)
-            fixedText = readFixedOverride(root)
-          } catch {
-            demo = false
-            nickname = null
-            devOverlay = null
-            fixedText = null
-          }
-          return buildSections({ ...args, demo, nickname, devOverlay, fixedText })
-        },
-        // 反破甲默认开：只扫最后一条 user 消息，命中时 attach 给这一次请求的 system 加一句提醒。
-        ...(cfg.guard?.enabled !== false ? { scanGuard: (text) => scan(text) } : {}),
-        // 开发者钥匙：只看最后一条 user 消息；命中只给这次 system 追加一段，不写事件/不写日志。
-        // 发布版不传这个依赖，attach 的 DEV_PROMPT 注入天然关闭（n74）。
-        ...(isRelease
-          ? {}
-          : {
-              isDevkey: (text) => {
-                try {
-                  return devkeyMod?.verifyDevkey?.(root, text) === true
-                } catch {
-                  return false
-                }
-              },
-            }),
+        buildSections: buildSectionsForHer,
+        ...guardDeps,
+        ...devkeyDeps,
         shouldAttach,
         // 聊天落库的门控：llm/stream 是全局 waterfall，别的会话的生成也会经过观察器。
         // 只有她屋里那条会话才记 heard/utterance：home.json 的 sessionId，或 shouldAttach
@@ -1819,10 +2009,61 @@ export function apply(ctx, config = {}) {
           }
           return false
         },
-        roomRuntime,
+        // 回来：各自家里说「我回来了」就吸收（不用码）；去客厅要通行码（n195）。
+        roomBack: backAbsorber('ordinary'),
+        roomRuntime: null,
         config: cfg,
         log,
       })
+
+      // 客厅：独立工作区（<root>/room/home.json），只接客厅会话。
+      if (roomRuntime) {
+        const roomSessionIds = new Set()
+        const rememberRoom = (sid) => {
+          if (!sid) return
+          roomSessionIds.delete(sid)
+          roomSessionIds.add(sid)
+          while (roomSessionIds.size > 200) roomSessionIds.delete(roomSessionIds.values().next().value)
+        }
+        const roomHomeOf = () => String(readRoomHome(root)?.workspacePath ?? readRoomHome(root)?.cwd ?? roomHomePaths(root).dir)
+        const roomSidOf = () => String(readRoomHome(root)?.sessionId ?? '')
+        const inRoomHome = (cwd) => {
+          const c = flatPath(cwd)
+          const h = flatPath(roomHomeOf())
+          return Boolean(c && h && (c === h || c.startsWith(`${h}/`)))
+        }
+        attachRoomOff = attachToAgents(safeCtx, {
+          getStore: () => live(),
+          buildSections: buildSectionsForHer,
+          ...guardDeps,
+          ...devkeyDeps,
+          shouldAttach: (agent) => {
+            try {
+              const sid = sidOf(agent)
+              if (inRoomHome(cwdOf(agent))) {
+                rememberRoom(sid)
+                return true
+              }
+              if (sid && sid === roomSidOf()) {
+                rememberRoom(sid)
+                return true
+              }
+              return false
+            } catch {
+              return false
+            }
+          },
+          isHerSession: (sid, key) => {
+            if (sid && sid === roomSidOf()) return true
+            if (sid && roomSessionIds.has(sid)) return true
+            if (key && String(key).startsWith('cwd:')) return inRoomHome(String(key).slice(4))
+            return false
+          },
+          roomRuntime,
+          config: cfg,
+          log,
+        })
+      }
     } catch (e) {
       log(`挂提示词桥失败：${errText(e)}`)
     }
@@ -1867,6 +2108,9 @@ export function apply(ctx, config = {}) {
       },
       // service 的完整状态（面板要的 demo 就在这里：成年鱼 {name,label}，普通鱼 null）。
       state: service.state,
+      // 派希丝的第二库：面板「看谁」切到她时读这些（只读工具面）。
+      piscesState: service.piscesState,
+      piscesStore: () => ensurePiscesBank(),
       demoInfo: service.demoInfo,
       nickname: service.nickname,
       setNickname: (name) => service.setNickname(name),
@@ -1898,6 +2142,16 @@ export function apply(ctx, config = {}) {
       biliQrSave: (key) => service.biliQrSave(key),
       biliQrDrop: (key) => service.biliQrDrop(key),
       readStore: () => ensureLive(),
+      // 表情包：GET /meme 只给包清单；GET /meme/<包>/<id>.png 出图（同源）。
+      memes: () => memePacks(),
+      // 客厅门票：POST 生成/复用一张通行码（贴进客厅 = 开门 90 分钟）；GET 看门开没开、码还剩哪张。
+      // 还有没用掉的码就原样返回它——别让「再点一次」把手上那张作废。
+      roomInvite: () => {
+        const alive = pendingInvites(root).find((x) => String(x && x.role) === 'room')
+        return alive || createInvite(root, { role: 'room' })
+      },
+      roomInvites: () => pendingInvites(root),
+      roomDoor: () => ({ open: Boolean(readTicket(root)), until: readTicket(root) }),
       seed: service.seed,
       writeSeed: service.writeSeed,
       adopt: service.adopt,
@@ -2078,7 +2332,7 @@ export function apply(ctx, config = {}) {
       nightlyTimer = null
     }
     stopConsolePoll()
-    for (const off of [attachOff, dualOff, consoleMount?.dispose, consoleInjectOff]) {
+    for (const off of [attachOff, attachRoomOff, dualOff, consoleMount?.dispose, consoleInjectOff]) {
       if (typeof off !== 'function') continue
       try {
         off()
@@ -2087,6 +2341,8 @@ export function apply(ctx, config = {}) {
       }
     }
     attachOff = null
+    attachRoomOff = null
+    roomInfoGetter = null
     dualOff = null
     consoleMount = null
     consoleInjectOff = null
@@ -2122,6 +2378,10 @@ export function apply(ctx, config = {}) {
   // 重启：如果开局选了“一同成长”，把派希丝的单独家/第二库接回来（幂等）。
   if (readSetup(root)?.together === true) {
     void ensurePiscesHomeOnce().catch((e) => log(`派希丝单独家启动失败：${errText(e)}`))
+  }
+  // 客厅自己的家：只在 setup.room 时建；幂等。
+  if (readSetup(root)?.room === true) {
+    void ensureRoomHomeOnce().catch((e) => log(`客厅启动失败：${errText(e)}`))
   }
 
   return dispose

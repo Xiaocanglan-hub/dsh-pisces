@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { WELCOME, ROOM_REMINDER_REPEAT, roomReminderMessages } from '../lib/welcome.js'
+import { WELCOME, ROOM_REMINDER_REPEAT, roomReminderMessages, welcomeText } from '../lib/welcome.js'
+import { LOCAL_CAST, resetCast, setCast } from '../lib/cast.js'
 
 test('welcome：定稿文案没有 5 处冲突', () => {
   // 1. 选项 2：改不了了
@@ -28,4 +29,17 @@ test('welcome：客厅提醒 3 条相同', () => {
   const msgs = roomReminderMessages()
   assert.equal(msgs.length, 3)
   assert.ok(msgs.every((m) => m === WELCOME.roomReminder))
+})
+
+test('welcome：本机 cast 走短版，不再说“我还有一个妹妹”', () => {
+  setCast(LOCAL_CAST)
+  try {
+    const text = welcomeText('pisces')
+    assert.match(text, /鲸歌是我姐姐/)
+    assert.ok(!text.includes('我还有一个妹妹'))
+    assert.match(welcomeText('sister'), /派希丝是我妹妹/)
+  } finally {
+    resetCast()
+  }
+  assert.match(welcomeText('pisces'), /我是派希丝，我是姐姐/)
 })

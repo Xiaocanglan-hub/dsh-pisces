@@ -2,7 +2,7 @@
 //
 // 覆盖的硬口径（知识库 n5 / n28 / n42）：
 // - apply 返回 disposer、provide('persona') 被调用；
-// - 工具面在 ready.then 之后注册 7 个动作，没有 ctx.tools 也不抛；
+// - 工具面在 ready.then 之后注册 8 个动作，没有 ctx.tools 也不抛；
 // - attach/dual/console 的开关；console deps 拿的是 service 方法；
 // - dispose 幂等、锁释放；启动期被停用 → ready 解析成 null；
 // - 没有 model 时 nightly 仍可创建；空库的 seed/adopt 口径；
@@ -170,7 +170,7 @@ test('index：导出 name/inject；apply 返回 disposer；provide 旧服务名 
   })
 })
 
-test('index：工具面在 ready.then 后注册 7 个动作；没有 ctx.tools 也加载、不抛', async () => {
+test('index：工具面在 ready.then 后注册 8 个动作；没有 ctx.tools 也加载、不抛', async () => {
   await withHome(async () => {
     const ctx = makeCtx({ withTools: true })
     const dispose = apply(ctx, {})
@@ -179,9 +179,9 @@ test('index：工具面在 ready.then 后注册 7 个动作；没有 ctx.tools �
     await tick()
     await tick()
     assert.equal(svc.ready instanceof Promise || typeof svc.ready?.then === 'function', true)
-    assert.equal(ctx.registered.length, 7, `注册了 ${ctx.registered.length} 个：${ctx.registered.map((x) => x.name).join(',')}`)
+    assert.equal(ctx.registered.length, 8, `注册了 ${ctx.registered.length} 个：${ctx.registered.map((x) => x.name).join(',')}`)
     const names = ctx.registered.map((x) => x.name)
-    for (const n of ['pisces_remember', 'pisces_recall', 'pisces_ask', 'pisces_card_edit', 'pisces_diary', 'pisces_look', 'pisces_speak']) {
+    for (const n of ['pisces_remember', 'pisces_recall', 'pisces_ask', 'pisces_card_edit', 'pisces_diary', 'pisces_look', 'pisces_speak', 'pisces_meme']) {
       assert.ok(names.includes(n), `少了 ${n}`)
     }
     dispose()
@@ -445,14 +445,14 @@ test('index 成年鱼：demoInfo 领养前 demo:false，领养后 demo:true / �
   })
 })
 
-test('index 成年鱼：工具面领养前 7 个、领养后重开 13 个（含 self/teach/guide/check/nickname/devkey）', async () => {
+test('index 成年鱼：工具面领养前 8 个、领养后重开 14 个（含 self/teach/guide/check/nickname/devkey）', async () => {
   await withHome(async () => {
     const before = makeCtx()
     const d1 = apply(before, {})
     await before.provideCalls[0][1].ready
     await tick()
     await tick()
-    assert.equal(before.registered.length, 7, `领养前：${before.registered.map((x) => x.name).join(',')}`)
+    assert.equal(before.registered.length, 8, `领养前：${before.registered.map((x) => x.name).join(',')}`)
     d1()
 
     // 工具面在启动期注册（n28）：领养后必须重开一次 apply 才会多出五个动作。
@@ -470,7 +470,7 @@ test('index 成年鱼：工具面领养前 7 个、领养后重开 13 个（含 
     await tick()
     await tick()
     const names = after.registered.map((x) => x.name)
-    assert.equal(after.registered.length, 13, `领养后：${names.join(',')}`)
+    assert.equal(after.registered.length, 14, `领养后：${names.join(',')}`)
     for (const n of ['pisces_self', 'pisces_teach', 'pisces_guide', 'pisces_check', 'pisces_nickname', 'pisces_dev']) {
       assert.ok(names.includes(n), `少了 ${n}`)
     }
@@ -478,7 +478,7 @@ test('index 成年鱼：工具面领养前 7 个、领养后重开 13 个（含 
   })
 })
 
-test('index 成年鱼：工具面 13 个 = 7 基础 + 6 特权，顺序稳定', async () => {
+test('index 成年鱼：工具面 14 个 = 8 基础 + 6 特权，顺序稳定', async () => {
   await withHome(async () => {
     const seeding = makeCtx()
     const d1 = apply(seeding, { home: { max: 0 } })
@@ -502,6 +502,7 @@ test('index 成年鱼：工具面 13 个 = 7 基础 + 6 特权，顺序稳定', 
         'pisces_diary',
         'pisces_look',
         'pisces_speak',
+        'pisces_meme',
         'pisces_self',
         'pisces_teach',
         'pisces_guide',
@@ -527,7 +528,7 @@ test('index 成年鱼：pisces_dev action:state 走真实组装（含样本历�
     assert.ok(rotated.key)
     d0()
 
-    // 工具面在启动期注册（成年鱼 13 个），这次 apply 才能拿到 pisces_dev。
+    // 工具面在启动期注册（成年鱼 14 个），这次 apply 才能拿到 pisces_dev。
     const ctx = makeCtx()
     const dispose = apply(ctx, { nightly: { auto: false }, home: { max: 0 } })
     await ctx.provideCalls[0][1].ready
@@ -596,9 +597,9 @@ test('index B 站：speak 没开时工具还在，回执是「说话功能没开
     await ctx.provideCalls[0][1].ready
     await tick()
     await tick()
-    assert.equal(ctx.registered.length, 7)
+    assert.equal(ctx.registered.length, 8)
     const def = ctx.registered.find((x) => x.name === 'pisces_speak')
-    assert.ok(def, '普通鱼也保留 pisces_speak（7 个动作）')
+    assert.ok(def, '普通鱼也保留 pisces_speak（8 个动作）')
     const out = await def.execute({ bvid: 'BV1xx411c7mD', text: '不说。' })
     assert.deepEqual(out, { text: '[没说成：说话功能没开]' })
     dispose()

@@ -1,0 +1,17 @@
+{
+  "name": "builtin",
+  "title": "内置表情",
+  "version": "1.2.0",
+  "license": "same-as-plugin",
+  "note": "豆包生成的简笔画表情（统一角色、透明底）。想换素材：把同名包放进 <数据目录>/memes/builtin/ 即可覆盖。",
+  "entries": [
+    { "id": "happy-1", "file": "happy-1.png", "mood": ["happy"], "intensity": 2, "text": "（尾巴拍了拍水面）" },
+    { "id": "laugh-1", "file": "laugh-1.png", "mood": ["laugh"], "intensity": 3, "text": "（笑得眼睛都没了）" },
+    { "id": "flat-1", "file": "flat-1.png", "mood": ["flat"], "intensity": 1, "text": "（看了你一眼，没说话）" },
+    { "id": "hmm-1", "file": "hmm-1.png", "mood": ["hmm"], "intensity": 2, "text": "（歪了下头）" },
+    { "id": "annoyed-1", "file": "annoyed-1.png", "mood": ["annoyed"], "intensity": 2, "text": "（不太想理你）" },
+    { "id": "shy-1", "file": "shy-1.png", "mood": ["shy"], "intensity": 2, "text": "（把脸别过去）" },
+    { "id": "tired-1", "file": "tired-1.png", "mood": ["tired"], "intensity": 1, "text": "（困了）" },
+    { "id": "serious-1", "file": "serious-1.png", "mood": ["serious"], "intensity": 2, "text": "（认真看着你）" }
+  ]
+}

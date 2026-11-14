@@ -412,11 +412,87 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function StatusTab({ snap, loading, seed, seedOverride, adultPicked, textOverride, biasOverride, onChanged }) {      const seedCard = h(SeedCard, { seed, seedOverride, adultPicked, textOverride, biasOverride, onChanged })
+    // 「看谁」切换（2026-11-14）：状态页/心理活动页共用；鲸歌走主库，派希丝走第二库。
+    function BankSwitch({ bank, onChange }) {
+      const pick = (id, label) =>
+        h(
+          'button',
+          { key: id, onClick: () => { if (bank !== id) onChange(id) }, disabled: bank === id, 'aria-pressed': bank === id },
+          label,
+        )
+      return h(
+        'div',
+        { className: 'row' },
+        h('span', { className: 'note' }, '看谁：'),
+        pick('main', '鲸歌'),
+        pick('pisces', '派希丝'),
+      )
+    }
+
+    // 客厅邀请码（2026-11-14）：放在设置页最上面。一次生成两张，各贴各自的家会话。
+    function RoomInviteCard() {
+      const [note, setNote] = useState('')
+      const [busy, setBusy] = useState(false)
+      const [door, setDoor] = useState(null)
+      const [code, setCode] = useState('')
+      useEffect(() => {
+        // 回来的时候码还在：面板只显示当前那张，不因为离开页面就丢。
+        getJson('/room-invite')
+          .then((r) => {
+            setDoor((r && r.door) || null)
+            if (r && r.code) setCode(String(r.code))
+          })
+          .catch(() => setDoor(null))
+      }, [])
+      async function make() {
+        setBusy(true)
+        try {
+          const r = await postJson('/room-invite', {})
+          if (!r || !r.ok) {
+            setNote((r && r.error) || '没生成出来')
+            return
+          }
+          const next = ((r.codes || [])[0] || {}).code || ''
+          setCode(next)
+          const mins = Math.max(1, Math.round((Number(r.expiresAt) - Date.now()) / 60000))
+          setNote(`${next}（${mins} 分钟内有效）：贴到客厅会话里发出去，门就开了。`)
+        } catch {
+          setNote('没生成出来')
+        } finally {
+          setBusy(false)
+        }
+      }
+      const doorText = door && door.open
+        ? `门开着${door.until ? `（到 ${new Date(Number(door.until)).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}）` : ''}`
+        : '门关着'
+      return h(
+        Card,
+        {
+          title: '去客厅 / 从客厅回来',
+          note: '去客厅要通行码：拿一张，贴到客厅会话里就开门（开 90 分钟）。回来不用码——到各自的家会话里说一句「我回来了」，她俩各自把客厅那段收进自己的库；两只都回来门才关（或者 90 分钟自己到点）。',
+          right: doorText,
+          full: true,
+        },
+        code ? h('p', { className: 'hint' }, `当前通行码：`, h('b', null, code)) : null,
+        note ? h('p', { className: 'hint' }, note) : null,
+        h(
+          'div',
+          { className: 'row' },
+          h('button', { onClick: make, disabled: busy }, busy ? '生成中…' : code ? '换一张通行码' : '拿一张通行码'),
+          h('span', { className: 'note' }, code ? '这张还没用；离开设置页再回来也还在。换一张会作废现在这张。' : ''),
+        ),
+      )
+    }
+
+    function StatusTab({ snap, loading, seed, seedOverride, adultPicked, textOverride, biasOverride, onChanged, bankBar, bank }) {
+      const seedCard = bank === 'pisces'
+        ? null
+        : h(SeedCard, { seed, seedOverride, adultPicked, textOverride, biasOverride, onChanged })
       if (!snap) {
         return h(
           'div',
           { className: 'page' },
+          bankBar || null,
           seedCard,
           h(
             Card,
@@ -444,6 +520,7 @@ window.__ModuleLoader__.load({
       return h(
         'div',
         { className: 'page' },
+        bankBar || null,
         seedCard,
         h(
           'div',
@@ -604,6 +681,7 @@ window.__ModuleLoader__.load({
       return h(
         'div',
         { className: 'page' },
+        h(RoomInviteCard, null),
         h('p', { className: 'hint' }, `她的数据：${data.root || '未读到'}（只读）`),
         h(
           Card,
@@ -771,11 +849,12 @@ window.__ModuleLoader__.load({
     // 页签：心理活动
     // -------------------------------------------------------------------------
 
-    function MindTab({ snap }) {
+    function MindTab({ snap, bankBar }) {
       if (!snap) {
         return h(
           Card,
           { title: '心理活动', note: '她最近在想什么。', right: '只读', full: true },
+          bankBar || null,
           h('p', { className: 'empty' }, '还没有读到。'),
         )
       }
@@ -788,6 +867,7 @@ window.__ModuleLoader__.load({
       return h(
         'div',
         { className: 'page' },
+        bankBar || null,
         h(
           Card,
           {
@@ -1047,6 +1127,9 @@ window.__ModuleLoader__.load({
       const [settings, setSettings] = useState(null)
       const [feedback, setFeedback] = useState('')
       const [feedbackNote, setFeedbackNote] = useState('')
+      const [bank, setBank] = useState('main')
+      const [piscesSnap, setPiscesSnap] = useState(null)
+      const [piscesLoading, setPiscesLoading] = useState(false)
 
       const load = useCallback(async () => {
         setLoading(true)
@@ -1083,6 +1166,34 @@ window.__ModuleLoader__.load({
         load()
       }, [load])
 
+      // 派希丝的第二库：同一套版式，换 /pisces/* 前缀。
+      const loadPisces = useCallback(async () => {
+        setPiscesLoading(true)
+        try {
+          const [state, dreams, ...talks] = await Promise.all([
+            getJson('/pisces/state'),
+            getJson('/pisces/dreams').catch(() => ({ dreams: [] })),
+            ...TALK_TYPES.map((type) => getJson(`/pisces/events?type=${type}&limit=12`).catch(() => ({ events: [] }))),
+          ])
+          const events = talks
+            .flatMap((r) => (r && Array.isArray(r.events) ? r.events : []))
+            .slice()
+            .sort((a, b) => Number(b.ts) - Number(a.ts) || Number(b.seq) - Number(a.seq))
+          setPiscesSnap({ state, questions: { questions: [] }, dreams, events, recent: events.slice(0, 10), nickname: null })
+        } catch {
+          setPiscesSnap({
+            state: { ok: false, reason: '第二个库没读到（setup.together 关着？）' },
+            questions: { questions: [] },
+            dreams: { dreams: [] },
+            events: [],
+            recent: [],
+            nickname: null,
+          })
+        } finally {
+          setPiscesLoading(false)
+        }
+      }, [])
+
       useEffect(() => {
         try {
           const saved = window.localStorage.getItem(FEEDBACK_KEY)
@@ -1107,6 +1218,15 @@ window.__ModuleLoader__.load({
       }
 
       const s = snap ? snap.state : null
+      const bankBar = h(BankSwitch, {
+        bank,
+        onChange: (next) => {
+          setBank(next)
+          if (next === 'pisces' && !piscesSnap) loadPisces()
+        },
+      })
+      const shownSnap = bank === 'pisces' ? piscesSnap : snap
+      const shownLoading = bank === 'pisces' ? piscesLoading : loading
       const sub = s
         ? `第 ${s.day == null ? '—' : s.day} 天 · 她记下 ${s.events == null ? '—' : s.events} 条 · 只看不改`
         : loading
@@ -1122,12 +1242,12 @@ window.__ModuleLoader__.load({
             })
           : h('p', { className: 'hint' }, '正在读设置…')
       }
-      else if (tab === 'mind') body = h(MindTab, { snap })
+      else if (tab === 'mind') body = h(MindTab, { snap: shownSnap, bankBar })
       else if (tab === 'principle') body = h(PrincipleTab)
       else if (tab === 'feedback')
         body = h(FeedbackTab, { value: feedback, note: feedbackNote, onChange: setFeedback, onSave: saveFeedback })
       else if (tab === 'thanks') body = h(ThanksTab)
-      else body = h(StatusTab, { snap, loading, seed, onChanged: load })
+      else body = h(StatusTab, { snap: shownSnap, loading: shownLoading, seed, onChanged: load, bankBar, bank })
 
       return h(
         'div',
@@ -1160,6 +1280,22 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 表情工具视图（n186）：回执尾部有 `[表情 包/id]` 就换成一张图，否则退回一行字。
+    const MEME_TOKEN = /\[表情 ([A-Za-z0-9_-]{1,40})\/([A-Za-z0-9_-]{1,40})\]/
+    const MEME_IMG = { width: 180, height: 180, objectFit: 'contain', borderRadius: 18, background: 'var(--dsw-alias-bg-base)' }
+    const MEME_LABEL = { fontSize: 13, color: 'var(--dsw-alias-label-secondary)' }
+    function MemeRow(props) {
+      const text = ((props?.block?.content) || []).filter((b) => b && b.type === 'text').map((b) => String(b.text ?? '')).join('\n')
+      const m = MEME_TOKEN.exec(text)
+      const [broken, setBroken] = useState(false)
+      if (!m) return h('div', { style: MEME_LABEL }, '表情')
+      const caption = text.replace(MEME_TOKEN, '').trim()
+      const src = `${API}/meme/${encodeURIComponent(m[1])}/${encodeURIComponent(m[2])}.png?v=2`
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, padding: '6px 2px' } },
+        broken ? h('div', { style: MEME_LABEL }, caption || '（表情没加载出来）') : h('img', { src, alt: caption || '表情', onError: () => setBroken(true), style: MEME_IMG }),
+        caption ? h('div', { style: MEME_LABEL }, caption) : null)
+    }
+
     // -------------------------------------------------------------------------
     // 注册：插件对象自己声明 inject:['slots']（n22）
     // -------------------------------------------------------------------------
@@ -1177,10 +1313,18 @@ window.__ModuleLoader__.load({
             ),
           EFFECT_LABEL,
         )
-      if (ctx && typeof ctx.effect === 'function') ctx.effect(mount, EFFECT_LABEL)
-      else mount()
+      // 表情：只替换 pisces_meme 这一种工具行，别的工具不受影响。
+      const mountMeme = () =>
+        ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({ name: 'tool.call.toolview', key: 'pisces_meme' }, MemeRow), `${EFFECT_LABEL}: meme`)
+      if (ctx && typeof ctx.effect === 'function') {
+        ctx.effect(mount, EFFECT_LABEL)
+        ctx.effect(mountMeme, `${EFFECT_LABEL}: meme`)
+      } else {
+        mount()
+        mountMeme()
+      }
     }
 
-    return { name: 'dsh-pisces-settings', inject, apply, Panel, StatusTab, SettingsTab, FeedbackTab, ThanksTab, TABS, THANKS }
+    return { name: 'dsh-pisces-settings', inject, apply, Panel, StatusTab, SettingsTab, FeedbackTab, ThanksTab, MemeRow, TABS, THANKS }
   },
 })

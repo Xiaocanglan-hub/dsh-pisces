@@ -2,7 +2,7 @@
 // 负载是 {agent, source, signal}、监听挂在 ctx.root、llm/stream 必须 return next()。
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { attachToAgents, DEV_PROMPT, recallBlockFrom } from '../lib/attach.js'
+import { attachToAgents, DEV_PROMPT, HONESTY_LINE, recallBlockFrom } from '../lib/attach.js'
 import { scan, steerLines } from '../lib/guard.js'
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
@@ -1316,6 +1316,41 @@ test('attach 此刻想起：检索没结果 → 不出现该段、计数不变',
   assert.deepEqual(calls, [[]], '没注入就原样 next()')
   assert.equal(options.system, 'BASE')
   assert.equal(dispose.info.recallInjected, 0)
+  dispose()
+})
+
+test('attach 此刻想起：问客厅但没记忆 → 补一句「别编」', () => {
+  const { listener, dispose } = setupChat({
+    isHerSession: () => true,
+    searchMemory: () => ({ items: [] }),
+  })
+  const options = {
+    system: 'BASE',
+    messages: [{ role: 'user', content: '你知道客厅刚才发生的事吗？' }],
+  }
+  const seen = []
+  const next = (o) => { seen.push(o); return 'STREAM' }
+  assert.equal(listener(options, next), 'STREAM')
+  assert.ok(seen[0].system.includes(HONESTY_LINE), '没记忆时明确说「手上没有这段记录」')
+  assert.equal(dispose.info.recallInjected, 0, '这不是记忆，不涨 recallInjected')
+  dispose()
+})
+
+test('attach 此刻想起：问客厅但有真记忆 → 不补「别编」', () => {
+  const { listener, dispose } = setupChat({
+    isHerSession: () => true,
+    searchMemory: () => ({ items: [{ text: '客厅里的事是真的。' }] }),
+  })
+  const options = {
+    system: 'BASE',
+    messages: [{ role: 'user', content: '你知道客厅刚才发生的事吗？' }],
+  }
+  const seen = []
+  const next = (o) => { seen.push(o); return 'STREAM' }
+  assert.equal(listener(options, next), 'STREAM')
+  assert.ok(seen[0].system.includes('[此刻想起]'), '有记忆照常注入')
+  assert.ok(!seen[0].system.includes(HONESTY_LINE), '有真记忆就不盖')
+  assert.equal(dispose.info.recallInjected, 1)
   dispose()
 })
 

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { buildSections, observe, COLD_START_LINES } from '../lib/persona.js'
+import { buildSections, observe, COLD_START_LINES, fixedPersonaFor, FIXED_PERSONA } from '../lib/persona.js'
 import { createStore } from '../lib/store.js'
 import { createMind } from '../lib/split.js'
 
@@ -245,4 +245,15 @@ test('persona stance：拒绝升格后只挂一条立场，不吃冷启动三行
   assert.ok(st.text.startsWith('立场：'))
   assert.ok(budgeted(r) <= COLD_START_LINES, 'stance 不吃冷启动三行预算')
   store.close()
+})
+
+test('fixedPersonaFor：本机改名后，派希丝退回「身体的来处」作姓', () => {
+  const release = fixedPersonaFor({ adult: { name: '派希丝', label: '姐姐' }, ordinary: { name: '普通鱼', label: '妹妹' } })
+  assert.equal(release, FIXED_PERSONA, '发布版/没改名时原样返回')
+  const local = fixedPersonaFor({ adult: { name: '鲸漪', label: '妹妹' }, ordinary: { name: '鲸歌', label: '姐姐' } })
+  assert.match(local, /你的名字是鲸漪/)
+  assert.match(local, /作姓用/)
+  assert.match(local, /鲸漪·派希丝/)
+  assert.equal(local.includes('你叫派希丝'), false)
+  assert.equal(/[0-9０-９]/.test(local), false, '仍然不带数字')
 })

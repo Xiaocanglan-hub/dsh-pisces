@@ -49,7 +49,7 @@ test('factory 返回的对象有 inject:["slots"]（n22 的坑）', () => {
   assert.equal(typeof mod.Panel, 'function')
 })
 
-test('apply 只注册一次 settings.section，标题是「鱼肥生双」', () => {
+test('apply 注册 settings.section 与 pisces_meme 两个槽位，标题是「鱼肥生双」', () => {
   const { mod } = loadBundle()
   const effectLabels = []
   const injects = []
@@ -73,15 +73,20 @@ test('apply 只注册一次 settings.section，标题是「鱼肥生双」', () 
 
   mod.apply(ctx)
 
-  assert.equal(effectLabels.length, 1)
+  assert.equal(effectLabels.length, 2)
   assert.equal(effectLabels[0], 'dsh-pisces: settings section')
-  assert.deepEqual(injects.map((x) => x.name), ['settings.section'])
-  assert.equal(registers.length, 1)
+  assert.deepEqual(injects.map((x) => x.name), ['settings.section', 'tool.call.toolview'])
+  assert.equal(registers.length, 2)
   assert.equal(registers[0].options.name, 'settings.section')
   assert.equal(registers[0].options.id, 'dsh-pisces')
   assert.equal(registers[0].options.order, 70)
   assert.equal(registers[0].options.label(), '鱼肥生双')
   assert.equal(registers[0].component, mod.Panel)
+
+  // 表情工具视图：只替换 pisces_meme 这一种工具行。
+  assert.equal(registers[1].options.name, 'tool.call.toolview')
+  assert.equal(registers[1].options.key, 'pisces_meme')
+  assert.equal(registers[1].component, mod.MemeRow)
 
   // 宿主现行签名是 slots.inject + slots.register（参考文档 §1.3 / ui-settings 同形）。
   assert.match(SRC, /ctx\.slots\.inject\(/)
@@ -162,9 +167,9 @@ test('空状态文案存在（还没有）', () => {
   assert.ok(empties.length >= 4, `空状态文案太少：${empties.length}`)
 })
 
-test('文件行数不超过 1200（防止又长成巨石文件）', () => {
+test('文件行数不超过 1360（防止又长成巨石文件；2026-11-14 邀请码卡显示当前码）', () => {
   const lines = SRC.split(/\r?\n/).length
-  assert.ok(lines <= 1200, `client.js 现在 ${lines} 行`)
+  assert.ok(lines <= 1360, `client.js 现在 ${lines} 行`)
 })
 
 test('不 import 宿主包，只 require react', () => {
