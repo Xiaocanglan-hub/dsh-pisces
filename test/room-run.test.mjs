@@ -69,7 +69,7 @@ test('room-run：点名谁就只谁开口', async () => {
   assert.equal(r2.calls, 1)
 })
 
-test('room-run：监测点名妹妹，妹妹再接一句', async () => {
+test('room-run：监测点名妹妹，不再额外喊一次（那次子调用是白跑的）', async () => {
   let n = 0
   const call = async () => {
     n++
@@ -79,7 +79,9 @@ test('room-run：监测点名妹妹，妹妹再接一句', async () => {
   }
   const r = await runRoom({ messages: user('今天有点累'), call, piscesSystem: 'P', fishSystem: 'F' })
   assert.equal(r.text, '【普通鱼】我听着。\n\n【派希丝】@普通鱼 你来说。')
-  assert.equal(r.calls, 3)
+  // 2026-11-14：点名后的那次 fish 子调用被删了（回了话却整段丢掉、白付一次调用）。
+  assert.equal(r.calls, 2, '只有 fish + monitor 两次')
+  assert.equal(n, 2, '第三次调用不该发生')
 })
 
 test('room-run：谁先被提到谁先说（先问的在前）', async () => {

@@ -675,6 +675,7 @@ function setupChat({
   isDevkey,
   searchMemory,
   roomRuntime,
+  roomBack,
 } = {}) {
   const ctx = makeCtx()
   const dispose = attachToAgents(ctx, {
@@ -686,6 +687,7 @@ function setupChat({
     isDevkey,
     searchMemory,
     roomRuntime,
+    roomBack,
     log: () => {},
   })
   ctx.root.emit('agent/created', { agent: makeAgent() })
@@ -1461,6 +1463,80 @@ test('attach 客厅：__piscesRoom 子调用原样 next()，不递归不落库',
   assert.equal(out, 'OK')
   assert.deepEqual(calls, [[]])
   assert.equal(store.calls.length, 0)
+  dispose()
+})
+
+// ---- 回家：口令命中后只给知会，不改她的话（2026-11-14 定案） ----
+// 三次尝试都不做：① 流头插 chunk 被宿主吞；② 提示词钉原话模型不听；
+// ③ 改写她第一段 = **替她说话**——她对「是不是自己说的」很敏感，这条不能碰。
+// 定案：回执只放面板首卡（谁已回来 / 门到几点），聊天里只多一行 system 知会。
+
+test('attach 回家：system 只加一行知会，chunk 与落库原样不动', async () => {
+  const store = makeStore()
+  const seen = []
+  let sentSystem = ''
+  const { listener, dispose } = setupChat({
+    store,
+    roomBack: (text) => {
+      seen.push(text)
+      return { ok: true }
+    },
+  })
+
+  const out = listener(
+    {
+      sessionId: 'sess_her',
+      system: 'BASE',
+      messages: [{ role: 'user', content: [{ type: 'text', text: '鲸漪，从客厅回来吧' }] }],
+    },
+    (opts) => {
+      sentSystem = String(opts?.system ?? '')
+      return (async function* () {
+        yield { type: 'text-delta', index: 0, text: '我回来了。' }
+        yield { type: 'text-delta', index: 0, text: '客厅那段收进来了。' }
+      })()
+    },
+  )
+  const chunks = await collectAll(out)
+
+  assert.deepEqual(seen, ['鲸漪，从客厅回来吧'], '口令按原话交给 roomBack')
+  assert.equal(chunks.length, 2)
+  assert.equal(chunks[0].text, '我回来了。', '不许改写她的话')
+  assert.equal(chunks[1].text, '客厅那段收进来了。')
+  assert.match(sentSystem, /刚从客厅回来/, '只加知会')
+  assert.equal(sentSystem.includes('门记下了'), false, '不塞回执')
+
+  await tick()
+  const utt = store.calls.filter((c) => c.type === 'utterance')
+  assert.equal(utt.length, 1)
+  assert.equal(utt[0].text, '我回来了。客厅那段收进来了。')
+  dispose()
+})
+
+test('attach 回家：普通聊天不注回执、不调 roomBack 的返回', async () => {
+  const store = makeStore()
+  let called = 0
+  let sentSystem = ''
+  const { listener, dispose } = setupChat({
+    store,
+    roomBack: () => { called++; return null },
+  })
+  const out = listener(
+    {
+      sessionId: 'sess_her',
+      system: 'BASE',
+      messages: [{ role: 'user', content: [{ type: 'text', text: '我今天累了' }] }],
+    },
+    (opts) => {
+      sentSystem = String(opts?.system ?? '')
+      return (async function* () {
+        yield { type: 'text-delta', index: 0, text: '那就早点睡。' }
+      })()
+    },
+  )
+  await collectAll(out)
+  assert.equal(called, 1)
+  assert.equal(sentSystem.includes('门记下了'), false, '没回家就不该有回执')
   dispose()
 })
 

@@ -57,7 +57,7 @@ import { planSetup } from './lib/setup-choice.js'
 import { migrateSetup } from './lib/setup-migrate.js'
 import { openPiscesBank } from './lib/pisces-bank.js'
 import { appendRoomLog, absorbRoomLog } from './lib/room-log.js'
-import { createInvite, consumeInvite, pendingInvites, openTicket, readTicket, markBack, isBackText } from './lib/room-invite.js'
+import { createInvite, consumeInvite, pendingInvites, openTicket, readTicket, readTicketInfo, markBack, isBackText } from './lib/room-invite.js'
 import { splitRoom } from './lib/room.js'
 import { attachPiscesSolo, ensurePiscesHome } from './lib/pisces-home.js'
 import { ensureRoomHome, readRoomHome, roomHomePaths } from './lib/room-home.js'
@@ -2151,7 +2151,19 @@ export function apply(ctx, config = {}) {
         return alive || createInvite(root, { role: 'room' })
       },
       roomInvites: () => pendingInvites(root),
-      roomDoor: () => ({ open: Boolean(readTicket(root)), until: readTicket(root) }),
+      // 面板首卡的权威状态：门开没开、到几点、上次谁回来过（带名字，发布版也是对的）。
+      roomDoor: () => {
+        const info = readTicketInfo(root)
+        const { adult, ordinary } = getCast()
+        return {
+          open: info.open,
+          until: info.until,
+          backed: {
+            ordinary: { name: ordinary.name, ok: info.backed.ordinary },
+            adult: { name: adult.name, ok: info.backed.adult },
+          },
+        }
+      },
       seed: service.seed,
       writeSeed: service.writeSeed,
       adopt: service.adopt,

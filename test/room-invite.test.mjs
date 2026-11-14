@@ -11,6 +11,7 @@ import {
   readInvites,
   openTicket,
   readTicket,
+  readTicketInfo,
   closeTicket,
   markBack,
   isBackText,
@@ -138,12 +139,43 @@ test('room-invite：门票开/关/过期，回家认得出来', () => {
     closeTicket(root)
     assert.equal(readTicket(root, { now: 30_000 }), null)
 
+    // 2026-11-14：改整句匹配。子串匹配会把普通聊天当成回家（「他回来了吗」曾经是 true）。
     assert.equal(isBackText('我回来了'), true)
-    assert.equal(isBackText('到家了，累死'), true)
-    assert.equal(isBackText('回客厅了'), true)
-    assert.equal(isBackText('他回来了吗'), true)
+    assert.equal(isBackText('到家了'), true)
+    assert.equal(isBackText('鲸漪，从客厅回来吧'), true, '要求句式（名字可省）')
+    assert.equal(isBackText('鲸歌，从客厅回来'), true)
+    assert.equal(isBackText('鲸歌 从客厅回来了！'), true, '去标点后整句相等')
+    assert.equal(isBackText('从客厅回来'), true)
+    assert.equal(isBackText('回客厅了'), false, '那是去客厅，不是回家')
+    assert.equal(isBackText('他回来了吗'), false, '子串不再算')
+    assert.equal(isBackText('到家了，累死'), false, '整句匹配，带别的字不算')
+    assert.equal(isBackText('我刚才从客厅回来了，你说什么？'), false)
     assert.equal(isBackText('今天有点累'), false)
     assert.equal(isBackText(''), false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('room-invite：面板读门状态与「谁回来了」（关门后 backed 仍留着）', () => {
+  const root = tmpRoot()
+  try {
+    assert.deepEqual(readTicketInfo(root), { open: false, until: 0, backed: { ordinary: false, adult: false } })
+    openTicket(root, { now: 1_000, ms: 60_000 })
+    const a = readTicketInfo(root, { now: 2_000 })
+    assert.equal(a.open, true)
+    assert.equal(a.until, 61_000)
+
+    markBack(root, 'adult', { now: 3_000 })
+    const b = readTicketInfo(root, { now: 4_000 })
+    assert.equal(b.backed.adult, true)
+    assert.equal(b.backed.ordinary, false)
+
+    markBack(root, 'ordinary', { now: 5_000 })
+    const c = readTicketInfo(root, { now: 6_000 })
+    assert.equal(c.open, false, '两只都回来，门关')
+    assert.equal(c.backed.ordinary, true, '关门后 backed 留着，面板还能显示上次谁回来了')
+    assert.equal(c.backed.adult, true)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

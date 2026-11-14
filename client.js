@@ -465,15 +465,22 @@ window.__ModuleLoader__.load({
       const doorText = door && door.open
         ? `门开着${door.until ? `（到 ${new Date(Number(door.until)).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}）` : ''}`
         : '门关着'
+      // 谁回来了**只在这里显示**：不往她的话里塞回执——她对自己说过什么很敏感，
+      // 硬拼一句「门记下了」等于替她说话（2026-11-14 拍板）。
+      const bk = (door && door.backed) || null
+      const backText = bk
+        ? `谁已回来：${bk.ordinary.name} ${bk.ordinary.ok ? '✓' : '—'}　${bk.adult.name} ${bk.adult.ok ? '✓' : '—'}`
+        : ''
       return h(
         Card,
         {
           title: '去客厅 / 从客厅回来',
-          note: '去客厅要通行码：拿一张，贴到客厅会话里就开门（开 90 分钟）。回来不用码——到各自的家会话里说一句「我回来了」，她俩各自把客厅那段收进自己的库；两只都回来门才关（或者 90 分钟自己到点）。',
+          note: '去客厅要通行码：拿一张，贴到客厅会话里就开门（开 90 分钟）。回来不用码——在各自的家会话里说一句「鲸漪，从客厅回来」（名字可省），她俩各自把客厅那段收进自己的库；两只都回来门才关（或者 90 分钟自己到点）。',
           right: doorText,
           full: true,
         },
         code ? h('p', { className: 'hint' }, `当前通行码：`, h('b', null, code)) : null,
+        backText ? h('p', { className: 'hint' }, backText) : null,
         note ? h('p', { className: 'hint' }, note) : null,
         h(
           'div',
