@@ -13,7 +13,12 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { apply, inject, name } from '../index.js'
-import { readSettings } from '../lib/settings.js'
+import { readSettings, writeSettings } from '../lib/settings.js'
+import { createSetup } from '../lib/setup.js'
+import { writeSetup } from '../lib/setup-file.js'
+import { openPiscesBank } from '../lib/pisces-bank.js'
+import { piscesHomePaths } from '../lib/pisces-home.js'
+import { dayOf } from '../lib/util.js'
 import { FIXED_PERSONA } from '../lib/persona.js'
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
@@ -146,6 +151,21 @@ async function withHome(fn) {
 
 const lockPath = (root) => path.join(root, 'lock.json')
 const readLock = (root) => JSON.parse(readFileSync(lockPath(root), 'utf8'))
+
+/** 走观测台挂在 ctx.routes[0] 的那条路由，拿 {status, body(JSON|null)}。 */
+async function readRoute(ctx, url) {
+  const route = ctx.routes[0]
+  assert.ok(route, '观测台应该已经挂上')
+  const res = { status: 0, body: '' }
+  await route.handler(
+    { method: 'GET', url },
+    {
+      writeHead(status) { res.status = status },
+      end(chunk) { res.body += chunk == null ? '' : String(chunk) },
+    },
+  )
+  return { status: res.status, body: res.body ? JSON.parse(res.body) : null }
+}
 
 test('index：导出 name/inject；apply 返回 disposer；provide 旧服务名 persona', async () => {
   await withHome(async () => {
@@ -1238,5 +1258,147 @@ test('index voice：没有适配器时 service.voice() 回 available:false；voi
     assert.match(r.reason, /文字/)
     assert.equal(existsSync(path.join(root, 'voice')), false)
     dispose()
+  })
+})
+
+// ---------------------------------------------------------------- 第二库（选项 3 + 一起成长）
+
+const NOON = new Date(2026, 10, 9, 12, 0, 0).getTime()
+const MIN = 60 * 1000
+
+test('index 空闲整理：单库模式（选项 1/2/3 选否）永不触发，也不建第二库', async () => {
+  for (const setup of [
+    createSetup({ mode: 'pisces' }),
+    createSetup({ mode: 'sister' }),
+    createSetup({ mode: 'both', together: false }),
+  ]) {
+    await withHome(async (root) => {
+      writeSetup(root, setup)
+      // 开关故意开到底：单库模式仍一个字都不该跑。
+      writeSettings(root, { pisces: { idleNightly: true } })
+      const ctx = makeCtx()
+      const dispose = apply(ctx, { nightly: { auto: false }, home: { max: 0 } })
+      try {
+        const svc = ctx.provideCalls.find(([n]) => n === 'persona')?.[1]
+        const main = await svc.ready
+        assert.ok(main)
+        const r = await svc.idleNightly({ now: NOON + 21 * MIN })
+        assert.notEqual(r.ran, true, `${setup.mode}/together=${setup.together} 不该跑空闲整理`)
+        assert.equal(r.ok, false)
+        assert.equal(existsSync(path.join(root, 'banks', 'pisces')), false, '单库模式不建第二库')
+        assert.equal(main.modeGet('nightly.last'), null, '主库夜间也没被这趟带跑')
+      } finally {
+        dispose()
+      }
+    })
+  }
+})
+
+test('index 空闲整理：三选项 + 一起成长、开关开着、主库 20 分钟没动静 → 只跑第二库', async () => {
+  await withHome(async (root) => {
+    writeSetup(root, createSetup({ mode: 'both', together: true, now: NOON }))
+    writeSettings(root, { pisces: { idleNightly: true } })
+    const ctx = makeCtx()
+    const dispose = apply(ctx, { nightly: { auto: false }, home: { max: 0 } })
+    try {
+      const svc = ctx.provideCalls.find(([n]) => n === 'persona')?.[1]
+      const main = await svc.ready
+      // 主库最后一条事件在 25 分钟前：算空闲。
+      await main.append({ type: 'heard', source: 'owner', text: '他今天来过了。', ts: NOON - 25 * MIN })
+
+      const r = await svc.idleNightly({ now: NOON })
+      assert.equal(r.ok, true)
+      assert.equal(r.ran, true, '第二库应该跑一趟')
+      assert.ok(r.steps && r.steps.reflect, '跑的是同一套夜间流水线')
+
+      // 第二库记了自己的 nightly.last / nightly.<day>。
+      const bank = await openPiscesBank(root)
+      try {
+        assert.equal(Number(bank.modeGet('nightly.last')), NOON)
+        assert.equal(bank.modeGet(`nightly.${dayOf(NOON)}`), '1')
+      } finally {
+        bank.close()
+      }
+      // 主库这趟一个字没动。
+      assert.equal(main.modeGet('nightly.last'), null)
+      assert.equal(svc.nightly.last(), null)
+
+      // 同一天再来一次：跳过（第二库今天已经整理过）。
+      const again = await svc.idleNightly({ now: NOON + MIN })
+      assert.equal(again.ran, false)
+      assert.match(again.reason, /今天/)
+
+      // 读接口也按库路由：/state?bank=pisces 看到的是第二库（0 条事件），不是主库那条。
+      const st = await readRoute(ctx, '/dsh-pisces-api/state?bank=pisces')
+      assert.equal(st.status, 200)
+      assert.equal(st.body.ok, true)
+      assert.equal(st.body.events, 0, '派希丝第二库还没事件')
+      const mainState = await svc.state()
+      assert.ok(mainState.events >= 1)
+      // /bridge?bank=pisces 看第二条 attach：这个测试没建她的单独家，所以回 503，而不是主库的 200。
+      const br = await readRoute(ctx, '/dsh-pisces-api/bridge?bank=pisces')
+      assert.equal(br.status, 503, '/bridge?bank=pisces 不该回主库那份快照')
+    } finally {
+      dispose()
+    }
+  })
+})
+
+test('index 卡按会话所属库：她单独家那条会话写 banks/pisces 的卡，别的会话写主库', async () => {
+  await withHome(async (root) => {
+    writeSetup(root, createSetup({ mode: 'both', together: true }))
+    // 第二条 attach 的家：home.json 的 sessionId 就是 bankOf 的判据（cwd 前缀是另一条）。
+    const hp = piscesHomePaths(root)
+    mkdirSync(path.dirname(hp.file), { recursive: true })
+    writeFileSync(hp.file, JSON.stringify({ sessionId: 'sess_solo_x', workspacePath: hp.dir }))
+    // 第二库先有一条真事件当证据（卡闸 2 要证据 id）。
+    const bank0 = await openPiscesBank(root)
+    const soloEv = await bank0.append({ type: 'heard', source: 'owner', text: '他把茶放在我手边。' })
+    bank0.close()
+
+    const ctx = makeCtx()
+    const dispose = apply(ctx, { nightly: { auto: false }, home: { max: 0 } })
+    try {
+      const svc = ctx.provideCalls.find(([n]) => n === 'persona')?.[1]
+      const main = await svc.ready
+      const mainEv = await main.append({ type: 'heard', source: 'owner', text: '今天风很大。' })
+
+      const soloAgent = { session: { header: { id: 'sess_solo_x', cwd: hp.dir } } }
+      const solo = await svc.cardPatch({
+        kind: 'bond',
+        target: '他',
+        text: '他把茶放在我手边。',
+        evidence: [soloEv.id],
+        agent: soloAgent,
+      })
+      assert.equal(solo.ok, true)
+      assert.equal(solo.decision, 'applied', solo.reasons?.join('；'))
+      assert.equal(existsSync(path.join(root, 'banks', 'pisces', 'card', 'bonds', '他.json')), true, '第二库有自己的卡')
+      assert.equal(existsSync(path.join(root, 'card', 'bonds', '他.json')), false, '别写进主库的卡')
+
+      const mainAgent = { session: { header: { id: 'sess_main_x', cwd: path.join(root, 'home') } } }
+      const mainPatch = await svc.cardPatch({
+        kind: 'bond',
+        target: '他',
+        text: '今天风很大。',
+        evidence: [mainEv.id],
+        agent: mainAgent,
+      })
+      assert.equal(mainPatch.ok, true)
+      assert.equal(mainPatch.decision, 'applied', mainPatch.reasons?.join('；'))
+      assert.equal(existsSync(path.join(root, 'card', 'bonds', '他.json')), true, '主库会话写主库的卡')
+
+      // 直接调（没有 agent）：老路径，仍是主库。
+      const noAgent = await svc.cardPatch({
+        kind: 'bond',
+        target: '天气',
+        text: '今天风很大。',
+        evidence: [mainEv.id],
+      })
+      assert.equal(noAgent.ok, true)
+      assert.equal(existsSync(path.join(root, 'card', 'bonds', '天气.json')), true)
+    } finally {
+      dispose()
+    }
   })
 })

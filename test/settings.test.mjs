@@ -146,3 +146,25 @@ test('needsRestart 只含 SCHEMA 里 restart:true 的项', () => {
   }
   assert.equal(readSettings(root).panel.affinity, false)
 })
+
+test('pisces.idleNightly：默认关、面板开关、不用重启', () => {
+  const root = mkRoot()
+  assert.equal(DEFAULTS.pisces.idleNightly, false, '默认关：单库/双库都只记不整理')
+  const spec = SCHEMA.find((s) => s.path === 'pisces.idleNightly')
+  assert.ok(spec, '设置 schema 里要有这一项（面板按它渲染开关）')
+  assert.equal(spec.kind, 'bool')
+  assert.equal(spec.restart, false, '定时器每轮现读 settings，不该要求重启')
+  assert.match(spec.label, /派希丝/)
+  assert.match(spec.hint, /空闲|夜间窗口/)
+
+  const r = writeSettings(root, { pisces: { idleNightly: true } })
+  assert.equal(r.ok, true)
+  assert.deepEqual(r.changed, ['pisces.idleNightly'])
+  assert.deepEqual(r.needsRestart, [])
+  assert.equal(readSettings(root).pisces.idleNightly, true)
+
+  const bad = writeSettings(root, { pisces: { idleNightly: 'yes' } })
+  assert.equal(bad.ok, false)
+  assert.equal(readSettings(root).pisces.idleNightly, true, '坏值不落盘')
+})
+

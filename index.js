@@ -40,7 +40,8 @@ import { listQuestions, setQuestionStatus } from './lib/questions.js'
 import { verifyDreams } from './lib/verify.js'
 import { learn as learnFromStore } from './lib/learn.js'
 import { importBrain, worldSummary, worldThreads } from './lib/world.js'
-import { createNightly } from './lib/nightly.js'
+import { createNightly, inNightlyWindow, NIGHTLY_WINDOW } from './lib/nightly.js'
+import { IDLE_QUIET_MS, ranNightlyToday, shouldRunIdle } from './lib/idle-nightly.js'
 import { importFishEvents, importFishRoot } from './lib/import.js'
 import { exportCardV2, exportSoulBundle, importSoulBundle } from './lib/export.js'
 import { PREFIX as CONSOLE_PREFIX, ADULT_LABEL, ADULT_NAME, registerConsole } from './lib/console.js'
@@ -55,11 +56,11 @@ import { createRoomRuntime } from './lib/room-runtime.js'
 import { readSetup, writeSetup } from './lib/setup-file.js'
 import { planSetup } from './lib/setup-choice.js'
 import { migrateSetup } from './lib/setup-migrate.js'
-import { openPiscesBank } from './lib/pisces-bank.js'
+import { openPiscesBank, piscesBankRoot } from './lib/pisces-bank.js'
 import { appendRoomLog, absorbRoomLog } from './lib/room-log.js'
 import { createInvite, consumeInvite, pendingInvites, openTicket, readTicket, readTicketInfo, markBack, isBackText } from './lib/room-invite.js'
 import { splitRoom } from './lib/room.js'
-import { attachPiscesSolo, ensurePiscesHome } from './lib/pisces-home.js'
+import { attachPiscesSolo, ensurePiscesHome, isPiscesHomeSession } from './lib/pisces-home.js'
 import { ensureRoomHome, readRoomHome, roomHomePaths } from './lib/room-home.js'
 import { relationLines } from './lib/relation.js'
 import { getCast, setCast } from './lib/cast.js'
@@ -315,10 +316,16 @@ export function apply(ctx, config = {}) {
   let piscesSoloOff = null
   let opening = null
   let mindInst = null
-  let nightlyInst = null
+  // 第二库（banks/pisces）自己的分流实例：只在选项 3 + together 时建。
+  let piscesMindInst = null
+  // 夜间按库实例：'main'（鲸歌主库）/ 'pisces'（她单独那边）。主库那一个的参数与以前完全一致。
+  const nightlyInsts = new Map()
   let nightlyModel = null
   let nightlyProbed = false
   let nightlyTimer = null
+  // 空闲整理（lib/idle-nightly.js）：10 分钟看一次，单飞，绝不和主库夜间窗口重叠。
+  let idleTimer = null
+  let idleRunning = false
   let attachOff = null
   let attachRoomOff = null
   let roomInfoGetter = null
@@ -345,7 +352,8 @@ export function apply(ctx, config = {}) {
     opening = (async () => {
       try {
         mindInst = null
-        nightlyInst = null
+        piscesMindInst = null
+        nightlyInsts.clear()
         const s = await createStore({ root, forceJsonl: Boolean(cfg.jsonl), log })
         store = s
         try {
@@ -386,6 +394,61 @@ export function apply(ctx, config = {}) {
     piscesBank = await openPiscesBank(root, { log })
     log(`派希丝库已开：${piscesBank.root || 'banks/pisces'}`)
     return piscesBank
+  }
+
+  /**
+   * 这条会话属于哪个库：她单独家那条 → 'pisces'；其它 → 'main'。
+   * 判据复用第二库 attach 的那一份（lib/pisces-home.js 的 isPiscesHomeSession：
+   * home.json 的 sessionId / cwd 前缀），不在这里另写一套。
+   */
+  function bankOf(sessionId = '', cwd = '') {
+    try {
+      if (isPiscesHomeSession(root, {
+        sessionId: String(sessionId ?? ''),
+        cwd: String(cwd ?? ''),
+      })) return 'pisces'
+    } catch {
+      /* 判据失败按主库：卡写错库比不写更糟 */
+    }
+    return 'main'
+  }
+
+  /** 工具执行带回来的 agent → {sessionId, cwd}；拿不到就给空串（bankOf 会走主库）。 */
+  function sessionOfAgent(agent) {
+    try {
+      return {
+        sessionId: sidOf(agent)
+          || String(agent?.sessionId ?? '')
+          || String(agent?.ctx?.session?.id ?? '')
+          || String(agent?.ctx?.session?.header?.id ?? ''),
+        cwd: cwdOf(agent)
+          || String(agent?.cwd ?? '')
+          || String(agent?.ctx?.cwd ?? '')
+          || String(agent?.ctx?.session?.header?.cwd ?? ''),
+      }
+    } catch {
+      return { sessionId: '', cwd: '' }
+    }
+  }
+
+  /** 第二库自己的分流实例（她的库、她的状态）；没有库回 null。 */
+  function getPiscesMind(bank = null) {
+    const b = bank || piscesBank
+    if (!b || (typeof b.isOpen === 'function' && !b.isOpen())) return null
+    if (!piscesMindInst) {
+      try {
+        piscesMindInst = createMind({
+          store: b,
+          log,
+          config: cfg.mind || {},
+          startDominance: initialDominance(b.readAll()),
+        })
+      } catch (e) {
+        log(`派希丝分流初始化失败：${errText(e)}`)
+        return null
+      }
+    }
+    return piscesMindInst
   }
 
   /** 夜间从客厅共享日志吸收：鲸歌走主库、派希丝走第二库；各库自己的游标防重复。
@@ -516,6 +579,8 @@ export function apply(ctx, config = {}) {
       log(`已就绪：${root}`)
     }
     startNightlyTimer()
+    // 第二库的空闲整理：默认关（设置 pisces.idleNightly），单库模式下定时器也只空转。
+    startIdlePiscesNightly()
     return s
   })()
 
@@ -599,11 +664,25 @@ export function apply(ctx, config = {}) {
   }
 
   async function cardPatch(args = {}) {
-    const s = await live()
+    // 卡跟着会话所属的库走：她单独家那条会话改的是 banks/pisces 的卡，别写进鲸歌的。
+    // 拿不到会话（服务直调/旧工具）就还是主库，和以前完全一样。
+    const who = sessionOfAgent(args?.agent)
+    const bank = bankOf(who.sessionId, who.cwd)
+    let s = null
+    let cardRoot = root
+    if (bank === 'pisces') {
+      try {
+        s = await ensurePiscesBank()
+      } catch {
+        s = null
+      }
+      if (s) cardRoot = String(s.root || piscesBankRoot(root))
+    }
+    if (!s) s = await live()
     if (!s) return { ok: false, decision: 'rejected', rev: 0, reasons: ['not-ready'] }
     try {
       return await patchCard(args, {
-        root,
+        root: cardRoot,
         store: s,
         now: Date.now(),
         log,
@@ -928,9 +1007,13 @@ export function apply(ctx, config = {}) {
    * 不建卡、不写卡、不刷摘要、不落事件。返回 {ok:true,text,rev}（text 是正文，不含「# 我」抬头）
    * 或 {ok:false,reason}；卡文件不存在/是空的时候 reason 是「卡还没写」。
    */
-  async function readCardSelf() {
+  async function readCardSelf(agent = null) {
     try {
-      const card = readCard(root)
+      // 读卡也按库：她单独家那条会话看的是 banks/pisces 的卡。
+      const who = sessionOfAgent(agent)
+      const bank = bankOf(who.sessionId, who.cwd)
+      const cardRoot = bank === 'pisces' ? piscesBankRoot(root) : root
+      const card = readCard(cardRoot)
       const raw = String(card.self ?? '')
       if (!raw.trim()) return { ok: false, reason: '卡还没写' }
       return { ok: true, text: card.selfBody, rev: Number(card.state?.rev) || 0 }
@@ -1054,12 +1137,14 @@ export function apply(ctx, config = {}) {
     return stateOf(s, md)
   }
 
-  /** 派希丝第二库的状态：同一套口径；这个进程里没有她的 mind 实例，分流给默认值。 */
+  /** 派希丝第二库的状态：同一套口径，分流用她自己的 mind 实例（没有就给默认值）。 */
   async function piscesState() {
     let b = null
     try { b = await ensurePiscesBank() } catch { b = null }
     if (!b) return { ok: false, reason: '没有第二库（setup.together 关着？）' }
-    return stateOf(b, {})
+    let md = {}
+    try { md = getPiscesMind(b)?.describe?.() || {} } catch { md = {} }
+    return stateOf(b, md)
   }
 
   /**
@@ -1261,8 +1346,8 @@ export function apply(ctx, config = {}) {
     return s ? { ok: true, threads: worldThreads(s, opts) } : notReady()
   }
 
-  async function learn(opts = {}) {
-    const s = await live()
+  /** 自学：给哪个库就在哪个库上跑（第二库的夜间不能读/写主库的问题）。 */
+  async function learnOnStore(s, opts = {}) {
     if (!s) return notReady()
     const o = optionsOf(opts)
     const out = await learnFromStore({
@@ -1273,6 +1358,12 @@ export function apply(ctx, config = {}) {
       log,
     })
     return out ?? notReady()
+  }
+
+  async function learn(opts = {}) {
+    const s = await live()
+    if (!s) return notReady()
+    return learnOnStore(s, opts)
   }
 
   async function verify(opts = {}) {
@@ -1357,7 +1448,7 @@ export function apply(ctx, config = {}) {
         }
         nightlyModel = create(modelOpts)
         // 探活回来之前创建的实例拿的是 null；重建一次，后续 run 才用得上模型。
-        nightlyInst = null
+        nightlyInsts.clear()
         log('本地模型已就绪，夜间可以用它')
       } catch (e) {
         log(`本地模型不在，夜间只用规则（${errText(e)}）`)
@@ -1365,17 +1456,19 @@ export function apply(ctx, config = {}) {
     })()
   }
 
-  function getNightly() {
+  /** 主库（鲸歌）的夜间实例：参数、模型、客厅吸收都和以前完全一致。 */
+  function mainNightly() {
     if (cfg.nightly?.enabled === false) return null
     const s = store
     if (!s || (typeof s.isOpen === 'function' && !s.isOpen())) return null
-    if (!nightlyInst) {
+    let inst = nightlyInsts.get('main')
+    if (!inst) {
       const ncfg = cfg.nightly || {}
       const wantsModel = ncfg.model?.enabled === true
       if (wantsModel && !nightlyModel) startNightlyProbe()
       // 没显式打开、或探活还没成功：传 null，夜间只跑规则。
       const model = wantsModel ? nightlyModel : null
-      const inst = createNightly({
+      inst = createNightly({
         store: s,
         log,
         config: ncfg,
@@ -1392,9 +1485,49 @@ export function apply(ctx, config = {}) {
       } catch {
         /* 冻结对象就算了 */
       }
-      nightlyInst = inst
+      nightlyInsts.set('main', inst)
     }
-    return nightlyInst
+    return inst
+  }
+
+  /**
+   * 第二库（banks/pisces）的夜间实例：只在选项 3 + together 时存在。
+   * - store / mind 都是她自己的：归因、分流、梦、核实都不碰主库；
+   * - learn 也必须落在她自己的库上（不能借主库的 service.learn）；
+   * - 客厅吸收归主库那一趟管，这里不重复吸。
+   */
+  function piscesNightly() {
+    if (cfg.nightly?.enabled === false) return null
+    const b = piscesBank
+    if (!b || (typeof b.isOpen === 'function' && !b.isOpen())) return null
+    let inst = nightlyInsts.get('pisces')
+    if (!inst) {
+      const ncfg = cfg.nightly || {}
+      const wantsModel = ncfg.model?.enabled === true
+      if (wantsModel && !nightlyModel) startNightlyProbe()
+      const model = wantsModel ? nightlyModel : null
+      inst = createNightly({
+        store: b,
+        log,
+        config: ncfg,
+        model,
+        learn: (o) => learnOnStore(b, o),
+        mind: piscesMindInst || getPiscesMind(b),
+        roomAbsorb: null,
+      })
+      try {
+        inst.model = model
+      } catch {
+        /* 冻结对象就算了 */
+      }
+      nightlyInsts.set('pisces', inst)
+    }
+    return inst
+  }
+
+  /** 按库取夜间实例；不带参数仍是主库（service.nightly / 面板 / 体检都走这一条）。 */
+  function getNightly(bank = 'main') {
+    return bank === 'pisces' ? piscesNightly() : mainNightly()
   }
 
   async function checkNightly() {
@@ -1417,6 +1550,95 @@ export function apply(ctx, config = {}) {
       void checkNightly()
     }, NIGHTLY_TICK_MS)
     nightlyTimer.unref?.()
+  }
+
+  /** 主库多久没动静算空闲；宿主 config.pisces.idleQuietMs 可以覆盖（测试也用它）。 */
+  function idleQuietMs() {
+    const n = Number(cfg.pisces?.idleQuietMs)
+    return Number.isFinite(n) && n > 0 ? n : IDLE_QUIET_MS
+  }
+
+  /**
+   * 空闲整理的第二库夜间：定时器每 10 分钟问一次，全部满足才跑。
+   * 条件（lib/idle-nightly.js 的纯函数）：选项 3 + together、设置 pisces.idleNightly、
+   * 不在 02:00–05:00、主库最后事件 ≥ 20 分钟、第二库今天没跑过、没有正在跑的。
+   * 单飞：idleRunning 期间再来一次直接跳过；失败只 log，不影响主库。
+   */
+  async function checkIdlePiscesNightly({ now = Date.now() } = {}) {
+    const at = Number(now) || Date.now()
+    // 1. 开关：先看设置/开局，单库模式在这里就返回，连库都不碰。
+    let setup = null
+    try {
+      setup = readSetup(root)
+    } catch {
+      setup = null
+    }
+    let settingOn = false
+    try {
+      settingOn = readSettings(root)?.pisces?.idleNightly === true
+    } catch {
+      settingOn = false
+    }
+    const enabled = setup?.together === true && settingOn
+    if (!enabled) {
+      return { ...shouldRunIdle({ now: at, enabled: false }), ran: false }
+    }
+    if (idleRunning) return { ...shouldRunIdle({ now: at, enabled: true, busy: true }), ran: false }
+
+    // 2. 窗口 / 主库最后事件 / 第二库今天跑过没有。
+    const inWindow = inNightlyWindow(at, cfg.nightly?.window || NIGHTLY_WINDOW)
+    let lastMainEventAt = null
+    let inst = null
+    let alreadyRanToday = false
+    try {
+      const main = await live()
+      const ev = typeof main?.last === 'function' ? main.last() : null
+      const ts = Number(ev?.ts)
+      if (ev && Number.isFinite(ts) && ts > 0) lastMainEventAt = ts
+    } catch {
+      lastMainEventAt = null
+    }
+    try {
+      const b = await ensurePiscesBank()
+      if (b) {
+        alreadyRanToday = ranNightlyToday(b, at)
+        inst = getNightly('pisces')
+      }
+    } catch (e) {
+      log(`派希丝单独整理：第二库没打开（${errText(e)}）`)
+      inst = null
+    }
+    const verdict = shouldRunIdle({
+      now: at,
+      lastMainEventAt,
+      alreadyRanToday,
+      inWindow,
+      busy: idleRunning,
+      enabled: Boolean(enabled && inst),
+      quietMs: idleQuietMs(),
+    })
+    if (!verdict.ok) return { ...verdict, ran: false }
+
+    // 3. 单飞执行：force 跳窗口/今天跑过（上面已经判过），顺序跑，不和别人并发。
+    idleRunning = true
+    try {
+      const r = await inst.run({ now: at, force: true })
+      if (r?.ran) log(`派希丝单独整理跑完：${r.steps ? Object.keys(r.steps).join('/') : ''}`)
+      return r
+    } catch (e) {
+      log(`派希丝单独整理失败：${errText(e)}`)
+      return { ok: false, ran: false, reason: errText(e) }
+    } finally {
+      idleRunning = false
+    }
+  }
+
+  function startIdlePiscesNightly() {
+    if (idleTimer) return
+    idleTimer = setInterval(() => {
+      void checkIdlePiscesNightly().catch((e) => log(`派希丝单独整理失败：${errText(e)}`))
+    }, NIGHTLY_TICK_MS)
+    idleTimer.unref?.()
   }
 
   /** 设置中心：每次都现读文件（面板打开时要看到刚存的值，而不是启动快照）。 */
@@ -1574,6 +1796,8 @@ export function apply(ctx, config = {}) {
     get nightly() {
       return getNightly()
     },
+    // 空闲整理的一次判定/执行：定时器每 10 分钟调它；测试/面板也能手动触发（单飞）。
+    idleNightly: checkIdlePiscesNightly,
     // 给面板/别的插件用的只读概览；不在契约里，但保留旧实现的出口。
     async observe() {
       const s = await live()
@@ -1699,7 +1923,7 @@ export function apply(ctx, config = {}) {
             // 开发者直接写卡：绕八道闸，但抬头/长度仍由 card.js 强制。
             devCard: (args) => service.devCard(args),
             // 开发者只读查询：看卡原文 / 看运行时固定段原文；都不写任何东西。
-            readCardSelf: () => readCardSelf(),
+            readCardSelf: (agent) => readCardSelf(agent),
             personaText: () => FIXED_PERSONA,
             // 固定段的文件覆盖（<root>/persona-fixed.md）：读现状 / 整段写 / 删掉回默认。
             fixedGet: () => service.fixed(),
@@ -2098,6 +2322,8 @@ export function apply(ctx, config = {}) {
       },
       // 诊断用：提示词桥到底挂没挂上（agentsSeen/sectionsAttached/agentsNotHer…）。
       bridge: () => (attachOff?.info ?? null),
+      // 第二条 attach（她单独家那条）的同一份快照：/bridge?bank=pisces 用。
+      piscesBridge: () => (piscesSoloOff?.info ?? null),
       // 输出侧语料标记：只给计数，不给原文（n12）。
       style: () => (attachOff?.info?.streamDebug ?? null),
       get nightly() {
@@ -2343,6 +2569,10 @@ export function apply(ctx, config = {}) {
       clearInterval(nightlyTimer)
       nightlyTimer = null
     }
+    if (idleTimer) {
+      clearInterval(idleTimer)
+      idleTimer = null
+    }
     stopConsolePoll()
     for (const off of [attachOff, attachRoomOff, dualOff, consoleMount?.dispose, consoleInjectOff]) {
       if (typeof off !== 'function') continue
@@ -2369,7 +2599,9 @@ export function apply(ctx, config = {}) {
       try { solo() } catch { /* 摘不到就算了 */ }
     }
     mindInst = null
-    nightlyInst = null
+    piscesMindInst = null
+    nightlyInsts.clear()
+    idleRunning = false
     if (b) {
       try {
         b.close()
