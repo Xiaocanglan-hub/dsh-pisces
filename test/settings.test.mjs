@@ -8,6 +8,7 @@ import {
   DEFAULTS,
   SCHEMA,
   mergeConfig,
+  NIGHTLY_MODEL_TIMEOUT_MS,
   NIGHTLY_PROBE_TIMEOUT_MS,
   nightlyWantsModel,
   readSettings,
@@ -209,5 +210,9 @@ test('nightlyWantsModel：配置的 model.enabled 和面板的 localModel 任一
 test('夜间探活超时：不准缩回 3 秒（4B 冷加载实测 13.5s）', () => {
   // 2026-11-15 真机：3s 必然失败 → 开关打开也永远「没有模型」。
   assert.ok(NIGHTLY_PROBE_TIMEOUT_MS >= 20_000, `给冷加载留够时间，当前 ${NIGHTLY_PROBE_TIMEOUT_MS}ms`)
+})
+
+test('夜间模型单次生成超时：要盖得住梦（实测 31–47s），别用适配器的 20s', () => {
+  assert.ok(NIGHTLY_MODEL_TIMEOUT_MS >= 60_000, `当前 ${NIGHTLY_MODEL_TIMEOUT_MS}ms`)
 })
 

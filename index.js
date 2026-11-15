@@ -66,7 +66,7 @@ import { relationLines } from './lib/relation.js'
 import { getCast, setCast } from './lib/cast.js'
 import { readCastFile } from './lib/cast-file.js'
 import { welcomeText } from './lib/welcome.js'
-import { NIGHTLY_PROBE_TIMEOUT_MS, SCHEMA as SETTINGS_SCHEMA, mergeConfig, nightlyWantsModel, publicSettings, readSettings, writeSettings } from './lib/settings.js'
+import { NIGHTLY_MODEL_TIMEOUT_MS, NIGHTLY_PROBE_TIMEOUT_MS, SCHEMA as SETTINGS_SCHEMA, mergeConfig, nightlyWantsModel, publicSettings, readSettings, writeSettings } from './lib/settings.js'
 import { discoverPacks, pickMeme } from './lib/meme.js'
 import { clearBili, hot, loginBili, readBili } from './lib/bili.js'
 import { createQrLogin } from './lib/biliqr.js'
@@ -1462,7 +1462,7 @@ export function apply(ctx, config = {}) {
           retryLater()
           return
         }
-        nightlyModel = create(modelOpts)
+        nightlyModel = create({ timeoutMs: NIGHTLY_MODEL_TIMEOUT_MS, ...modelOpts })
         // 探活回来之前创建的实例拿的是 null；重建一次，后续 run 才用得上模型。
         nightlyInsts.clear()
         log('本地模型已就绪，夜间可以用它')

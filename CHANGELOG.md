@@ -2,6 +2,19 @@
 
 本项目遵循语义化版本；`0.x` 期间小版本可能带行为变化。
 
+## 0.3.4
+
+- **夜间模型：梦要「时间够 + 上限够」**（真机已验证：`dream.ok=true`，14.5 秒出一个合格的梦）。
+  - `lib/dream.js` 新增 `DREAM_MAX_TOKENS = 900`，`dream()` 调 `model.ask(prompt, { maxTokens })`。原来不传，吃适配器默认的 160 token，梦的 JSON 被截断 → 解析失败，夜里看就是「跑了但没梦」。
+  - `lib/settings.js` 新增 `NIGHTLY_MODEL_TIMEOUT_MS = 120_000`，`index.js` 建夜间模型时默认套上。原来吃适配器默认的 20 秒，而梦实测要 31 秒（4B）/ 47 秒（16k），必然超时。
+  - 配合 0.3.3 的 `nightlyWantsModel`（面板的 `nightly.localModel` 与配置的 `nightly.model.enabled` 两处都认）与 45 秒探活，**面板上那个「夜间用本地模型」开关这次是真的生效了**——0.3.3 之前它是个死开关。
+- **自学：宁可不查，也不乱查**（真机：`POST /learn → {ok:true, studied:[]}`，不再乱抓）。
+  - `lib/learn.js`：`kind:'to-you'` 的问题（问人、问关系的那类）不再拿去搜。
+  - 新增 `TERM_STOP` 过滤二元虚词（还是 / 就是 / 什么 …）；滤完没有实词就回「问题里没有可查的实词」，不发请求。
+  - `usableFact` 要求同时命中 **≥2 个实词**才收，只沾一个边的不算。
+- **给 0.3.3 用户的话**：这两批是 0.3.4 才带的。0.3.3 只修了开关与探活，梦仍会被 160 token / 20 秒截断、自学仍是旧口径——**升级到 0.3.4 才拿得到**。
+- 测试：**670/670**。
+
 ## 0.3.3
 
 - **P0-2「接住刚才那句」**（新增 `lib/repair.js` + `lib/search.js` + `lib/attach.js` 接线）：他纠正/补充/追问时（「不是这个」「我说的是…」「哪个？」），把最近 3 条 heard/utterance 折成修复窗口交给检索，命中同一 seq 或高度重叠 token 的条目**末分 ×1.2**。判据是纯函数 `classifyRepair` / `buildRepairWindow`，不调模型、不改台词、不进 system、不落库；`/bridge` 与 `/state` 新增 `repairHits`（只给次数）。

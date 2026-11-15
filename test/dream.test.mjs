@@ -10,6 +10,7 @@ import {
   checkDream,
   dream,
   DREAM_GATES,
+  DREAM_MAX_TOKENS,
   DREAM_MIN_SENTENCES,
   DREAM_MAX_SENTENCES,
 } from '../lib/dream.js'
@@ -71,6 +72,24 @@ function fakeModel(reply) {
 }
 
 const replyOf = (d) => JSON.stringify(d)
+
+test('dream：生成必须带 maxTokens（适配器默认 160 会把 JSON 截断）', async () => {
+  // 2026-11-15 真机：不传 maxTokens 时 4B 的梦 JSON 被截在半截，解析失败 → 夜间只报「没有模型给的梦」。
+  const store = await mkStore()
+  addQuestion(store, Q1)
+  let sawOpts = null
+  const model = {
+    name: 'capture',
+    async ask(_prompt, opts) {
+      sawOpts = opts || {}
+      return replyOf(GOOD)
+    },
+  }
+  await dream({ store, model, now: NOW })
+  assert.ok(sawOpts, 'model.ask 必须被调用')
+  assert.equal(sawOpts.maxTokens, DREAM_MAX_TOKENS)
+  assert.ok(DREAM_MAX_TOKENS >= 400, `上限要够装下整段 JSON，当前 ${DREAM_MAX_TOKENS}`)
+})
 
 test('没有模型 / 模型没给成形 JSON：不落 dream_sim，只落 dream:failed 的 meta', async () => {
   const store = await mkStore()

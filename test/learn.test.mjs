@@ -68,8 +68,7 @@ test('studyKey：16 位十六进制；对去疑问词后的句子取 hash，两�
   assert.notEqual(k, studyKey('天为什么总是灰的？'))
 })
 
-test('搜索只用去疑问词后的词，走 Bing', async () => {
-  const store = await mkStore()
+test('搜索只用去疑问词后的词，走 Bing', async () => {  const store = await mkStore()
   const url = 'https://example.com/a'
   const fetchImpl = scriptedFetch({
     items: [{ title: '猫踩奶是什么', url, snippet: '猫踩奶是幼猫吃奶时用前爪按压母猫乳房的本能行为。' }],
@@ -204,8 +203,8 @@ test('learn：只查没查过的，最多 maxQuestions 条；都查过返回空 
 
   const second = await learn({ store, now: NOW, maxQuestions: 5, fetchImpl })
   assert.equal(second.ok, true)
-  assert.deepEqual(second.studied.map((s) => s.question), [q3], '只剩 q3 没查')
-  assert.equal(store.studiesAll().length, 3)
+  assert.deepEqual(second.studied, [], 'q3 是问人的（to-you），不该拿去搜')
+  assert.equal(store.studiesAll().length, 2, '没有新增 studies 行')
 
   assert.deepEqual(await learn({ store, now: NOW, maxQuestions: 5, fetchImpl }), { ok: true, studied: [] })
   store.close()
@@ -267,5 +266,47 @@ test('同一件事的两种问法：同 key，后查的覆盖原行而不是新�
   assert.equal(rows[0].question, '猫踩奶', 'question 保留最近一次的原句')
   assert.deepEqual(rows[0].facts, r2.facts)
   assert.equal(rows[0].sources[0].url, b)
+  store.close()
+})
+
+test('只靠虚词沾上的句子不算素材：今晚那句 R星 脏数据不许再进来', async () => {
+  // 2026-11-15 真机：问「你是人类，还是 AI？」，抽回的是
+  // 「…还是发现这个邮箱之前已经注册过R星账号…」——它只靠「还是」这一个二元组沾上问题。
+  const store = await mkStore()
+  const url = 'https://example.com/rstar'
+  const fetchImpl = scriptedFetch({
+    items: [{ title: '服务状态说明', url, snippet: '' }],
+    pages: {
+      [url]: page('如图所示最后在服务界面下方查看状态，绿灯说明正常，黄灯说明正在维护。但是还是发现这个邮箱之前已经注册过R星账号，不知道是怎么操作的。'),
+    },
+  })
+  const r = await study({ store, question: '你是人类，还是 AI？', fetchImpl, now: NOW, maxPages: 1 })
+  assert.equal(r.ok, false, '抽不出素材就不算查到')
+  assert.ok(!(r.facts || []).some((f) => f.includes('R星')), '脏数据不许进 facts')
+  store.close()
+})
+
+test('问人的问题（kind:to-you）不去查：learn 不会把它送进搜索', async () => {
+  const store = await mkStore([
+    { key: 'to-you-1', kind: 'to-you', text: '你要不要我帮你装 FFmpeg？', status: 'open', since: NOW, refs: [], source: 'utterance' },
+  ])
+  const fetchImpl = scriptedFetch({ items: [], pages: {} })
+  const r = await learn({ store, fetchImpl, now: NOW, maxQuestions: 1 })
+  assert.equal(r.ok, true)
+  assert.deepEqual(r.studied, [])
+  assert.equal(fetchImpl.seen.length, 0, '问人的问题不该去搜')
+  store.close()
+})
+
+test('只沾一个实词不算素材：那句话留在页面上，不进 facts', async () => {
+  const store = await mkStore()
+  const url = 'https://example.com/a'
+  const fetchImpl = scriptedFetch({
+    items: [{ title: '猫踩奶', url, snippet: '' }],
+    // 只有「踩奶」没有「猫踩」，沾不到两个实词
+    pages: { [url]: page('今天踩奶了，房间里很安静，窗外的风也停了。') },
+  })
+  const r = await study({ store, question: '猫为什么会踩奶', fetchImpl, now: NOW, maxPages: 1 })
+  assert.equal(r.ok, false, '抽不出素材就不算查到')
   store.close()
 })
