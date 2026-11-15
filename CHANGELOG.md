@@ -2,6 +2,16 @@
 
 本项目遵循语义化版本；`0.x` 期间小版本可能带行为变化。
 
+## 0.3.3
+
+- **P0-2「接住刚才那句」**（新增 `lib/repair.js` + `lib/search.js` + `lib/attach.js` 接线）：他纠正/补充/追问时（「不是这个」「我说的是…」「哪个？」），把最近 3 条 heard/utterance 折成修复窗口交给检索，命中同一 seq 或高度重叠 token 的条目**末分 ×1.2**。判据是纯函数 `classifyRepair` / `buildRepairWindow`，不调模型、不改台词、不进 system、不落库；`/bridge` 与 `/state` 新增 `repairHits`（只给次数）。
+  - **开关 `settings.repair.enabled` 默认 false**。**关着时检索输出与改动前逐条一致**（不传 `boostRef` 时 `search.js` 里那条分支根本不走，有 golden 快照测试盯着）；打开后也只影响排序，不改召回口径。
+- **P0-3 观测 usage**：`streamDebug` 新增 `usageSeen`（见过几条 usage chunk）与 `usageIn`（认得出的输入 token 数之和，认不出记 0）。**只观测、不落盘、不当门槛**——真机上的 usage 形状还没证实。
+- **夜间模型的开关与探活**（今天真机实测的两个 bug）：
+  - `lib/settings.js` 新增 `nightlyWantsModel(cfg)`：面板的 `nightly.localModel` 与配置文件的 `nightly.model.enabled` **两处都认**（之前只认后者，面板那个开关是死的）；`index.js` 三处接线改用它。
+  - 探活超时 `NIGHTLY_PROBE_TIMEOUT_MS = 45_000`（原来是写死的 3 秒；4B 冷加载实测 13.5 秒，3 秒必然失败），且**探活失败不再永久记住**——记 `nightlyProbeNextAt`，10 分钟后自动重试。日志随之改为「本地模型探活失败，夜间只用规则」。
+- 测试：**665/665**（新增 P0-2 分类器/窗口/开关/golden 与夜间开关、usage 字段等用例）。
+
 ## 0.3.2
 
 - **第二条鱼也完整长大了**（`index.js`）：选「全都要 + 一起成长」时，派希丝住在 `banks/pisces`，原来只有聊天记录在长；现在 **nightly（归因 / 提问 / 梦 / 核实）· 分流 mind · 人设卡** 都按库各开一套，她自己的库跑她自己的流水线。主库那条路径逐字未变。

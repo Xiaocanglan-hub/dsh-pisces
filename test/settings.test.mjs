@@ -8,6 +8,8 @@ import {
   DEFAULTS,
   SCHEMA,
   mergeConfig,
+  NIGHTLY_PROBE_TIMEOUT_MS,
+  nightlyWantsModel,
   readSettings,
   settingsPath,
   writeSettings,
@@ -166,5 +168,46 @@ test('pisces.idleNightly：默认关、面板开关、不用重启', () => {
   const bad = writeSettings(root, { pisces: { idleNightly: 'yes' } })
   assert.equal(bad.ok, false)
   assert.equal(readSettings(root).pisces.idleNightly, true, '坏值不落盘')
+})
+
+test('repair.enabled：默认关、面板开关、不用重启', () => {
+  const root = mkRoot()
+  assert.equal(DEFAULTS.repair.enabled, false, '默认关：没人看着时不替所有人重排检索')
+  const spec = SCHEMA.find((s) => s.path === 'repair.enabled')
+  assert.ok(spec, '设置 schema 里要有这一项（面板按它渲染开关）')
+  assert.equal(spec.kind, 'bool')
+  assert.equal(spec.restart, false, 'attach 每轮现读 settings，不该要求重启')
+  assert.match(spec.label, /接住|刚才/)
+  assert.match(spec.hint, /检索|排前/)
+
+  const r = writeSettings(root, { repair: { enabled: true } })
+  assert.equal(r.ok, true)
+  assert.deepEqual(r.changed, ['repair.enabled'])
+  assert.deepEqual(r.needsRestart, [], '不用重启')
+  assert.equal(readSettings(root).repair.enabled, true)
+
+  const bad = writeSettings(root, { repair: { enabled: 'yes' } })
+  assert.equal(bad.ok, false)
+  assert.equal(readSettings(root).repair.enabled, true, '坏值不落盘')
+})
+
+test('nightlyWantsModel：配置的 model.enabled 和面板的 localModel 任一为真', () => {
+  // 2026-11-15 首次夜间实测：只有配置口径为真时，面板那个开关是死的。
+  assert.equal(nightlyWantsModel({}), false)
+  assert.equal(nightlyWantsModel({ nightly: {} }), false)
+  assert.equal(nightlyWantsModel({ nightly: { localModel: false } }), false)
+  assert.equal(nightlyWantsModel({ nightly: { localModel: true } }), true, '面板开关为真就认')
+  assert.equal(nightlyWantsModel({ nightly: { model: { enabled: true } } }), true, '老配置口径照旧')
+  assert.equal(nightlyWantsModel({ nightly: { model: { enabled: false } } }), false)
+  assert.equal(
+    nightlyWantsModel(mergeConfig({}, { nightly: { localModel: true } })),
+    true,
+    'settings 合并进 cfg 之后也能认出来',
+  )
+})
+
+test('夜间探活超时：不准缩回 3 秒（4B 冷加载实测 13.5s）', () => {
+  // 2026-11-15 真机：3s 必然失败 → 开关打开也永远「没有模型」。
+  assert.ok(NIGHTLY_PROBE_TIMEOUT_MS >= 20_000, `给冷加载留够时间，当前 ${NIGHTLY_PROBE_TIMEOUT_MS}ms`)
 })
 

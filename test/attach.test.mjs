@@ -2,7 +2,12 @@
 // 负载是 {agent, source, signal}、监听挂在 ctx.root、llm/stream 必须 return next()。
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { attachToAgents, DEV_PROMPT, HONESTY_LINE, recallBlockFrom } from '../lib/attach.js'
+import { REPAIR_BOOST } from '../lib/search.js'
+import { createStore } from '../lib/store.js'
 import { scan, steerLines } from '../lib/guard.js'
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
@@ -674,6 +679,7 @@ function setupChat({
   isHerSession = () => true,
   isDevkey,
   searchMemory,
+  repairEnabled,
   roomRuntime,
   roomBack,
 } = {}) {
@@ -686,6 +692,7 @@ function setupChat({
     isHerSession,
     isDevkey,
     searchMemory,
+    repairEnabled,
     roomRuntime,
     roomBack,
     log: () => {},
@@ -859,8 +866,56 @@ test('attach 聊天：宿主 text-delta 形状 → utterance 拼起来，计数�
     utterancesWritten: 1,
     styleFlagged: 0,
     styleCounts: {},
+    usageSeen: 0,
+    usageIn: 0,
     lastChunkShape: '',
   })
+  dispose()
+})
+
+// ---- P0-3：usage 只观测（usageSeen/usageIn），不改文本、不落盘、不改行为 ----
+
+test('attach 聊天：流里出现 usage → streamDebug.usageSeen > 0，行为不变', async () => {
+  const { store, listener, dispose } = setupChat()
+  async function* withUsage() {
+    yield { type: 'text-delta', text: '在的。' }
+    yield { type: 'usage', input_tokens: 12, output_tokens: 3 }
+  }
+
+  await collectAll(listener({ messages: [{ role: 'user', content: '在吗' }] }, () => withUsage()))
+  assert.equal(dispose.info.streamDebug.usageSeen, 1)
+  assert.equal(dispose.info.streamDebug.usageIn, 12, '认得出 input_tokens 就记下；认不出记 0')
+  assert.equal(dispose.info.utterancesWritten, 1, '仍是原来的一条 utterance，落库行为不变')
+  const utterances = store.calls.filter((e) => e.type === 'utterance')
+  assert.equal(utterances.length, 1)
+  assert.equal(utterances[0].text, '在的。')
+  assert.equal(store.calls.filter((e) => e.type === 'meta').length, 0, '不写 meta:flush / 任何落盘')
+  dispose()
+})
+
+test('attach 聊天：流里没有 usage → streamDebug.usageSeen 为 0', async () => {
+  const { store, listener, dispose } = setupChat()
+  async function* noUsage() {
+    yield { type: 'text-delta', text: '在的。' }
+  }
+
+  await collectAll(listener({ messages: [{ role: 'user', content: '在吗' }] }, () => noUsage()))
+  assert.equal(dispose.info.streamDebug.usageSeen, 0)
+  assert.equal(dispose.info.streamDebug.usageIn, 0)
+  assert.equal(store.calls.filter((e) => e.type === 'utterance').length, 1)
+  dispose()
+})
+
+test('attach 聊天：usage 的 prompt_tokens 形状也认（真机没证实，只求不误判）', async () => {
+  const { listener, dispose } = setupChat()
+  async function* withPromptTokens() {
+    yield { type: 'text-delta', text: '嗯。' }
+    yield { type: 'usage', prompt_tokens: 21, completion_tokens: 2 }
+  }
+
+  await collectAll(listener({ messages: [{ role: 'user', content: '在吗' }] }, () => withPromptTokens()))
+  assert.equal(dispose.info.streamDebug.usageSeen, 1)
+  assert.equal(dispose.info.streamDebug.usageIn, 21)
   dispose()
 })
 
@@ -1411,6 +1466,147 @@ test('attach 此刻想起：记忆超过 800 字 → 截断、标题还在、不
   const wide = recallBlockFrom(items, { k: items.length })
   assert.ok(wide.startsWith('[此刻想起]'))
   assert.ok(wide.length <= 800, `硬上限 800（实际 ${wide.length}）`)
+  dispose()
+})
+
+/** 修复窗口用的假库：两条最近事件，最后一句她说过的话足够触发 overlap。 */
+function repairStore() {
+  const store = {
+    calls: [],
+    append(input) { store.calls.push(input); return { id: `ev${store.calls.length}` } },
+    readAll: () => [
+      { seq: 7, type: 'utterance', text: '我最近想吃那家牛肉面。' },
+      { seq: 8, type: 'heard', text: '楼下新开了家牛肉面馆。' },
+    ],
+  }
+  return store
+}
+
+test('attach 修复：开关默认关 → 分类命中也不传 boostRef，repairHits 不涨', () => {
+  const searches = []
+  const { listener, dispose } = setupChat({
+    store: repairStore(),
+    isHerSession: () => true,
+    searchMemory: (s, opts) => {
+      searches.push(opts)
+      return { items: [{ text: '牛肉面' }] }
+    },
+  })
+
+  // 「不是，我是说…」会被 classifyRepair 判成 correct，但开关默认关。
+  listener(
+    { system: 'BASE', messages: [{ role: 'user', content: '不是，我是说牛肉面那家。' }] },
+    () => 'OK',
+  )
+  assert.equal(searches.length, 1)
+  assert.equal('boostRef' in searches[0], false, '默认关不传 boostRef')
+  assert.equal(dispose.info.repairHits, 0, '没真正加权就不计数')
+  dispose()
+})
+
+test('attach 修复：开关开 + 库是空的 → 不传 boostRef', () => {
+  const searches = []
+  const { listener, dispose } = setupChat({
+    isHerSession: () => true,
+    repairEnabled: () => true,
+    searchMemory: (s, opts) => {
+      searches.push(opts)
+      return { items: [{ text: '一条记忆' }] }
+    },
+  })
+
+  listener(
+    { system: 'BASE', messages: [{ role: 'user', content: '不是，我是说牛肉面那家。' }] },
+    () => 'OK',
+  )
+  assert.equal('boostRef' in searches[0], false, '没有窗口时传参形状与老版一致')
+  assert.equal(dispose.info.repairHits, 0)
+  dispose()
+})
+
+test('attach 修复：开关开 + need=none → 不传 boostRef', () => {
+  const searches = []
+  const { listener, dispose } = setupChat({
+    store: repairStore(),
+    isHerSession: () => true,
+    repairEnabled: () => true,
+    searchMemory: (s, opts) => {
+      searches.push(opts)
+      return { items: [{ text: '一条记忆' }] }
+    },
+  })
+
+  listener(
+    { system: 'BASE', messages: [{ role: 'user', content: '今天风大。' }] },
+    () => 'OK',
+  )
+  assert.equal('boostRef' in searches[0], false, '没命中修复就不重排')
+  assert.equal(dispose.info.repairHits, 0)
+  dispose()
+})
+
+test('attach 修复：开关开 + 分类命中 → 传 boostRef，k/预算不变，repairHits+1', () => {
+  const searches = []
+  const { listener, dispose } = setupChat({
+    store: repairStore(),
+    isHerSession: () => true,
+    repairEnabled: () => true,
+    searchMemory: (s, opts) => {
+      searches.push(opts)
+      return { items: [{ text: '牛肉面' }] }
+    },
+  })
+
+  listener(
+    { system: 'BASE', messages: [{ role: 'user', content: '不是，我是说牛肉面那家。' }] },
+    () => 'OK',
+  )
+  assert.equal(searches.length, 1)
+  assert.ok(searches[0].boostRef, '命中时要传 boostRef')
+  assert.equal(searches[0].boostRef.seqs.has(7), true)
+  assert.equal(searches[0].boostRef.seqs.has(8), true)
+  assert.equal(searches[0].boostRef.weight, REPAIR_BOOST)
+  assert.equal(searches[0].boostRef.need, 'correct')
+  assert.equal(searches[0].k, 5, '条数预算不变')
+  assert.equal(searches[0].budget, 800, '字数预算不变')
+  assert.equal(dispose.info.repairHits, 1, '真正传给检索才 +1')
+  dispose()
+})
+
+test('attach 修复：开关开 + 纠正 → 目标在 [此刻想起] 里排到前面', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pisces-attach-repair-'))
+  const store = await createStore({ root, forceJsonl: true })
+  const now = Date.now()
+  const DAY = 86_400_000
+  await store.append({ type: 'utterance', text: '我最近想吃牛肉面。', ts: now - 180 * DAY, source: 'tool' })
+  await store.append({ type: 'utterance', text: '茶泡久了会苦。', ts: now - 20 * DAY, source: 'tool' })
+  await store.append({ type: 'utterance', text: '明天早点回来，别淋雨。', ts: now - 10 * DAY, source: 'tool' })
+  await store.append({
+    type: 'utterance',
+    text: '他说楼下新开了家牛肉面馆，问我要不要去。',
+    ts: now - DAY,
+    source: 'tool',
+  })
+
+  const { listener, dispose } = setupChat({
+    store,
+    isHerSession: () => true,
+    repairEnabled: () => true,
+  })
+  const seen = []
+  listener(
+    { system: 'BASE', messages: [{ role: 'user', content: '不是，我是说牛肉面那家。' }] },
+    (o) => { seen.push(o); return 'OK' },
+  )
+
+  const block = seen[0].system.slice(seen[0].system.indexOf('[此刻想起]'))
+  assert.ok(block.startsWith('[此刻想起]'))
+  const iTarget = block.indexOf('他说楼下新开了家牛肉面馆')
+  const iComp = block.indexOf('我最近想吃牛肉面')
+  assert.ok(iTarget >= 0 && iComp >= 0, `两条都应被想起：${block}`)
+  assert.ok(iTarget < iComp, `目标应排在竞争条目前面：${block}`)
+  assert.equal(dispose.info.repairHits, 1)
+  store.close()
   dispose()
 })
 

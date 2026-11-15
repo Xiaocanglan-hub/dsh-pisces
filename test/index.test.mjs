@@ -954,7 +954,7 @@ test('index 夜间模型：model 缺省 → nightly.model 为 null（默认不�
   })
 })
 
-test('index 夜间模型：enabled:true 但探活失败 → nightly.model 为 null，log「本地模型不在，夜间只用规则」', async () => {
+test('index 夜间模型：enabled:true 但探活失败 → nightly.model 为 null，log「本地模型探活失败」，10 分钟后可重试', async () => {
   await withHome(async () => {
     const logs = []
     const prevLog = console.log
@@ -979,7 +979,7 @@ test('index 夜间模型：enabled:true 但探活失败 → nightly.model 为 nu
       const svc = ctx.provideCalls[0][1]
       await svc.ready
       assert.equal(svc.nightly.model, null)
-      const saw = await until(() => logs.some((l) => l.includes('本地模型不在，夜间只用规则')), 1000)
+      const saw = await until(() => logs.some((l) => l.includes('本地模型探活失败，夜间只用规则')), 1000)
       assert.equal(saw, true, logs.join('\n'))
       assert.equal(created, 0, '探活失败就不该创建模型')
       assert.equal(svc.nightly.model, null)

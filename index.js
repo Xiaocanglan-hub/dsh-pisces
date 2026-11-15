@@ -66,7 +66,7 @@ import { relationLines } from './lib/relation.js'
 import { getCast, setCast } from './lib/cast.js'
 import { readCastFile } from './lib/cast-file.js'
 import { welcomeText } from './lib/welcome.js'
-import { SCHEMA as SETTINGS_SCHEMA, mergeConfig, publicSettings, readSettings, writeSettings } from './lib/settings.js'
+import { NIGHTLY_PROBE_TIMEOUT_MS, SCHEMA as SETTINGS_SCHEMA, mergeConfig, nightlyWantsModel, publicSettings, readSettings, writeSettings } from './lib/settings.js'
 import { discoverPacks, pickMeme } from './lib/meme.js'
 import { clearBili, hot, loginBili, readBili } from './lib/bili.js'
 import { createQrLogin } from './lib/biliqr.js'
@@ -322,6 +322,7 @@ export function apply(ctx, config = {}) {
   const nightlyInsts = new Map()
   let nightlyModel = null
   let nightlyProbed = false
+  let nightlyProbeNextAt = 0
   let nightlyTimer = null
   // 空闲整理（lib/idle-nightly.js）：10 分钟看一次，单飞，绝不和主库夜间窗口重叠。
   let idleTimer = null
@@ -508,6 +509,14 @@ export function apply(ctx, config = {}) {
           home: piscesHome,
           getBank: () => ensurePiscesBank(),
           roomBack: backAbsorber('adult'),
+          // 修复窗口跟主库同一个开关；默认关，每轮现读。
+          repairEnabled: () => {
+            try {
+              return readSettings(root)?.repair?.enabled === true
+            } catch {
+              return false
+            }
+          },
           config: cfg,
           log,
         })
@@ -1433,17 +1442,24 @@ export function apply(ctx, config = {}) {
    */
   function startNightlyProbe() {
     if (nightlyProbed) return
+    if (Date.now() < nightlyProbeNextAt) return
     nightlyProbed = true
     const mcfg = cfg.nightly?.model && typeof cfg.nightly.model === 'object' ? cfg.nightly.model : {}
     const { probe: probeImpl, create: createImpl, enabled: _enabled, ...modelOpts } = mcfg
     const probe = typeof probeImpl === 'function' ? probeImpl : probeLocalModel
     const create = typeof createImpl === 'function' ? createImpl : createLocalModel
+    // 探活失败不再永久记住：10 分钟后允许再试一次（模型可能是冷加载超时，不是不在）。
+    const retryLater = () => {
+      nightlyProbed = false
+      nightlyProbeNextAt = Date.now() + 10 * 60 * 1000
+    }
     void (async () => {
       try {
-        // 固定 3s：别用 model 的 20s——探活就是为了不每条都等超时。
-        const r = await probe({ ...modelOpts, timeoutMs: 3000 })
+        // 4B 冷加载实测 ~13.5s（2026-11-15）；给 45s 一次机会，别用 3s。
+        const r = await probe({ ...modelOpts, timeoutMs: NIGHTLY_PROBE_TIMEOUT_MS })
         if (!r?.ok) {
-          log('本地模型不在，夜间只用规则')
+          log(`本地模型探活失败，夜间只用规则（${r?.reason || '未知'}）；10 分钟后重试`)
+          retryLater()
           return
         }
         nightlyModel = create(modelOpts)
@@ -1451,7 +1467,8 @@ export function apply(ctx, config = {}) {
         nightlyInsts.clear()
         log('本地模型已就绪，夜间可以用它')
       } catch (e) {
-        log(`本地模型不在，夜间只用规则（${errText(e)}）`)
+        log(`本地模型探活失败，夜间只用规则（${errText(e)}）；10 分钟后重试`)
+        retryLater()
       }
     })()
   }
@@ -1464,7 +1481,7 @@ export function apply(ctx, config = {}) {
     let inst = nightlyInsts.get('main')
     if (!inst) {
       const ncfg = cfg.nightly || {}
-      const wantsModel = ncfg.model?.enabled === true
+      const wantsModel = nightlyWantsModel(cfg)
       if (wantsModel && !nightlyModel) startNightlyProbe()
       // 没显式打开、或探活还没成功：传 null，夜间只跑规则。
       const model = wantsModel ? nightlyModel : null
@@ -1503,7 +1520,7 @@ export function apply(ctx, config = {}) {
     let inst = nightlyInsts.get('pisces')
     if (!inst) {
       const ncfg = cfg.nightly || {}
-      const wantsModel = ncfg.model?.enabled === true
+      const wantsModel = nightlyWantsModel(cfg)
       if (wantsModel && !nightlyModel) startNightlyProbe()
       const model = wantsModel ? nightlyModel : null
       inst = createNightly({
@@ -2215,6 +2232,14 @@ export function apply(ctx, config = {}) {
         buildSections: buildSectionsForHer,
         ...guardDeps,
         ...devkeyDeps,
+        // 修复窗口：默认关（settings.repair.enabled=false）；每轮现读，改了不用重启。
+        repairEnabled: () => {
+          try {
+            return readSettings(root)?.repair?.enabled === true
+          } catch {
+            return false
+          }
+        },
         shouldAttach,
         // 聊天落库的门控：llm/stream 是全局 waterfall，别的会话的生成也会经过观察器。
         // 只有她屋里那条会话才记 heard/utterance：home.json 的 sessionId，或 shouldAttach
@@ -2322,6 +2347,8 @@ export function apply(ctx, config = {}) {
       },
       // 诊断用：提示词桥到底挂没挂上（agentsSeen/sectionsAttached/agentsNotHer…）。
       bridge: () => (attachOff?.info ?? null),
+      // 修复窗口真正加权过几次（只给 /state 与 /bridge 看次数）。
+      repairHits: () => (attachOff?.info?.repairHits ?? 0),
       // 第二条 attach（她单独家那条）的同一份快照：/bridge?bank=pisces 用。
       piscesBridge: () => (piscesSoloOff?.info ?? null),
       // 输出侧语料标记：只给计数，不给原文（n12）。
@@ -2515,7 +2542,8 @@ export function apply(ctx, config = {}) {
   mountConsoleWhenReady()
 
   // 夜间模型显式 opt-in：开机就探一次（3s），别等第一次整理才发现模型不在。
-  if (cfg.nightly?.enabled !== false && cfg.nightly?.model?.enabled === true) startNightlyProbe()
+  // 认两处口径：配置的 nightly.model.enabled，或面板开关 nightly.localModel（见 nightlyWantsModel）。
+  if (cfg.nightly?.enabled !== false && nightlyWantsModel(cfg)) startNightlyProbe()
 
   // 11. 家：已经领养/写过起点的话，在宿主侧栏里建一个工作区 + 一条会话（幂等）。
   // 只在事件流里有 demo 或 seed 时才建；config.home.enabled === false 时整块跳过。

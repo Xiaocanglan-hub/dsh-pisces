@@ -8,7 +8,7 @@ import { createStore } from '../lib/store.js'
 import { dayOf } from '../lib/util.js'
 import { writeSeed } from '../lib/seed.js'
 import { EventEmitter } from 'node:events'
-import { handle, page, readBody, registerConsole, toNodeHandler, ADULT_LABEL, PREFIX } from '../lib/console.js'
+import { handle, page, readBody, registerConsole, toNodeHandler, ADULT_LABEL, PREFIX, buildState } from '../lib/console.js'
 import { SCHEMA, publicSettings, readSettings, writeSettings } from '../lib/settings.js'
 import { NICKNAME_MAX, nicknameOf, setNickname as writeNickname } from '../lib/nickname.js'
 import { BAIDU_FILE, TBS_API, USERINFO_API, loginBaidu, readBaidu } from '../lib/baidu.js'
@@ -42,6 +42,42 @@ function assertJsonHeaders(res) {
   assert.match(res.headers['content-type'], /application\/json/)
   assert.equal(res.headers['cache-control'], 'no-store')
 }
+
+test('/bridge：repairHits 只给次数', async () => {
+  const res = await call('GET', '/bridge', undefined, {
+    bridge: () => ({
+      enabled: true,
+      recallInjected: 2,
+      repairHits: 3,
+      streamDebug: { streamsWrapped: 1, usageSeen: 1 },
+    }),
+  })
+  assert.equal(res.status, 200)
+  const body = payload(res)
+  assert.equal(body.bridge.repairHits, 3, '只给次数')
+  assert.equal(body.bridge.recallInjected, 2)
+  assert.equal(body.bridge.streamDebug.usageSeen, 1)
+  // 不额外带命中的条目/原因。
+  assert.equal(Object.prototype.hasOwnProperty.call(body.bridge, 'repairTargets'), false)
+})
+
+test('buildState：repairHits 默认 0，给了就原样带上', async () => {
+  const store = await mkStore()
+  await store.append({ type: 'utterance', text: '今天风大。', source: 'tool' })
+  assert.equal(buildState(store, null, null, NOW).repairHits, 0, '默认 0')
+  assert.equal(buildState(store, null, null, NOW, null, 4).repairHits, 4)
+  assert.equal(buildState(store, null, null, NOW, null, 'x').repairHits, 0, '坏值归 0')
+  store.close()
+})
+
+test('/state：repairHits 跟着 deps 走（只给次数）', async () => {
+  const store = await mkStore()
+  await store.append({ type: 'utterance', text: '今天风大。', ts: NOW, source: 'tool' })
+  const res = await call('GET', '/state', undefined, { store, repairHits: () => 7 })
+  assert.equal(res.status, 200)
+  assert.equal(payload(res).repairHits, 7)
+  store.close()
+})
 
 /** 假 Node 响应：记下 writeHead/end 的调用，验证 handler 真的回了包。 */
 function fakeRes() {
