@@ -53,6 +53,20 @@ window.__ModuleLoader__.load({
 
     const QUESTION_NAMES = { open: '悬着', answered: '答过', dropped: '放下', observed: '留意过' }
 
+    // 夜间六步的中文名与状态码（服务端只给 ok/skip/fail，见 lib/nightly.js 的 summarizeSteps）。
+    const STEP_NAMES = { reflect: '归因', mind: '分流', questions: '问题', dream: '做梦', verify: '核实', learn: '自学', room: '客厅' }
+    const STEP_CODES = { ok: '做成', skip: '跳过', fail: '没成' }
+
+    /** 把 /nightly.lastSteps 念成一行「归因 做成 · 做梦 跳过」；没有就空。 */
+    function stepsLine(lastSteps) {
+      const codes = lastSteps && lastSteps.steps
+      if (!codes) return ''
+      return Object.keys(STEP_NAMES)
+        .filter((k) => codes[k])
+        .map((k) => `${STEP_NAMES[k]} ${STEP_CODES[codes[k]] || codes[k]}`)
+        .join(' · ')
+    }
+
     // -------------------------------------------------------------------------
     // 小工具
     // -------------------------------------------------------------------------
@@ -491,6 +505,78 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 「问她这件事」（n213）：只把**主人自己的话**放进剪贴板，主人自己粘进对话里发出去。
+    // 不替她开口、不往她的事件流里写、不调任何接口——主动性留给人这一侧。
+    function askLine(text, verb) {
+      const q = String(text == null ? '' : text).trim()
+      if (!q) return ''
+      return `你${verb || '想起过'}「${q}」，你怎么想的？`
+    }
+
+    function AskButton({ line, label }) {
+      const [note, setNote] = useState('')
+      const text = String(line || '').trim()
+      if (!text) return null
+      const copy = () => {
+        const done = () => setNote('已复制，粘到和她说话的地方发出去。')
+        const fail = () => setNote('这台浏览器不让复制，手动抄一下这句话。')
+        try {
+          if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done, fail)
+            return
+          }
+        } catch {
+          // 落到下面的失败提示
+        }
+        fail()
+      }
+      return h('div', { className: 'row' },
+        h('button', { type: 'button', onClick: copy }, label || '问她这件事'),
+        note ? h('span', { className: 'hint' }, note) : null)
+    }
+
+    // 「她最近自己做的事」卡（n213）：只读；只给时间、次数、状态码，不给聊天原文。
+    function RecentDoingsCard({ snap, last, bank }) {
+      if (bank === 'pisces') return null
+      const wonder = snap.wonder || null
+      const studies = snap.studies || null
+      const steps = (snap.nightly && snap.nightly.lastSteps) || null
+      if (!wonder && !studies && !steps) {
+        return h(
+          Card,
+          { title: '她最近自己做的事', note: '她自己待着的时候想起来、查到的。', right: '只读', full: true },
+          h('p', { className: 'empty' }, '这一栏还没读到（改完源码要重启宿主）。'),
+        )
+      }
+      const latest = wonder && wonder.latest ? wonder.latest : null
+      const studied = studies && Array.isArray(studies.studies) ? studies.studies[0] : null
+      const stepText = stepsLine(steps)
+      const wonderText = !wonder
+        ? '这一项读不到'
+        : wonder.last
+          ? `${age(wonder.last)}${wonder.nextAt ? ` · 下次最早 ${when(wonder.nextAt).slice(0, 10)}` : ''}`
+          : '还没想起来过（七天一句）'
+      const studyText = !studies ? '这一项读不到' : studied ? `${age(studied.at)} · 一共 ${studies.total ?? studies.count ?? 0} 条` : '还没查过'
+      return h(
+        Card,
+        {
+          title: '她最近自己做的事',
+          note: '她自己待着的时候想起来、查到的。只摆时间和状态，不摆聊天原文。',
+          right: '只读',
+          full: true,
+        },
+        h('p', { className: 'hint' }, `上次夜里：${last ? `${age(last)}（${when(last)}）` : '还没整理过'}${stepText ? ` · ${stepText}` : ''}`),
+        h('p', { className: 'hint' }, `她自己想起来：${wonderText}`),
+        h('p', { className: 'hint' }, `最近自学：${studyText}`),
+        latest
+          ? h('div', null,
+              h('div', { className: 'meta' }, h('span', { className: 'tag' }, '自己想的'), h('span', null, when(latest.since))),
+              h('p', { className: 'text' }, latest.text || '（没有正文）'))
+          : h('p', { className: 'empty' }, '她还没自己想过问题。'),
+        latest ? h(AskButton, { line: askLine(latest.text), label: '问她这件事' }) : null,
+      )
+    }
+
     function StatusTab({ snap, loading, seed, seedOverride, adultPicked, textOverride, biasOverride, onChanged, bankBar, bank }) {
       const seedCard = bank === 'pisces'
         ? null
@@ -572,6 +658,7 @@ window.__ModuleLoader__.load({
           rv ? stat('scars', { label: '疤', value: s.scars == null ? '—' : s.scars, hint: '他难过之后留下的' }) : null,
           h(Stat, { label: '上次整理', value: age(last), hint: last ? when(last) : '夜间流水线还没跑过' }),
         ),
+        h(RecentDoingsCard, { snap, last, bank }),
         h(
           Card,
           {
@@ -899,10 +986,9 @@ window.__ModuleLoader__.load({
               h(
                 'div',
                 null,
-                h(
-                  'div',
-                  { className: 'meta' },
+                h('div', { className: 'meta' },
                   h('span', { className: 'tag' }, QUESTION_NAMES[q.status] || q.status || '悬着'),
+                  q.source === 'wonder' ? h('span', { className: 'tag ok' }, '自己想的') : null,
                   h('span', null, when(q.since)),
                 ),
                 h('p', { className: 'text' }, q.text || '（没有正文）'),
@@ -930,6 +1016,9 @@ window.__ModuleLoader__.load({
                   h('span', null, when(d.ts)),
                 ),
                 h('p', { className: 'text' }, rejected ? `这次没做成梦：${why}` : d.hypothesis || d.text || '（没有正文）'),
+                rejected || !(d.hypothesis || d.text)
+                  ? null
+                  : h(AskButton, { line: askLine(d.hypothesis || d.text, '梦见过'), label: '问她这个梦' }),
               )
             },
           }),
@@ -1151,17 +1240,29 @@ window.__ModuleLoader__.load({
           ])
           setSeed(seedInfo)
           setSettings(cfgInfo)
-          const [nightly, questions, dreams, ...talks] = await Promise.all([
+          const [nightly, questions, dreams, wonder, studies, ...talks] = await Promise.all([
             getJson('/nightly').catch(() => null),
             getJson('/questions').catch(() => ({ questions: [] })),
             getJson('/dreams').catch(() => ({ dreams: [] })),
+            getJson('/wonder').catch(() => null),
+            getJson('/studies').catch(() => ({ studies: [] })),
             ...TALK_TYPES.map((type) => getJson(`/events?type=${type}&limit=12`).catch(() => ({ events: [] }))),
           ])
           const events = talks
             .flatMap((r) => (r && Array.isArray(r.events) ? r.events : []))
             .slice()
             .sort((a, b) => Number(b.ts) - Number(a.ts) || Number(b.seq) - Number(a.seq))
-          setSnap({ state, nightly, questions, dreams, events, recent: events.slice(0, 10), nickname: (nickInfo && nickInfo.nickname) || null })
+          setSnap({
+            state,
+            nightly,
+            questions,
+            dreams,
+            wonder,
+            studies,
+            events,
+            recent: events.slice(0, 10),
+            nickname: (nickInfo && nickInfo.nickname) || null,
+          })
         } catch (e) {
           setErr(`读不到她的状态：${String((e && e.message) || e)}`)
         } finally {
@@ -1332,6 +1433,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    return { name: 'dsh-pisces-settings', inject, apply, Panel, StatusTab, SettingsTab, FeedbackTab, ThanksTab, MemeRow, TABS, THANKS }
+    return { name: 'dsh-pisces-settings', inject, apply, Panel, StatusTab, SettingsTab, MindTab, FeedbackTab, ThanksTab, MemeRow, TABS, THANKS }
   },
 })

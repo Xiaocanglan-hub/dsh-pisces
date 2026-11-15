@@ -86,7 +86,7 @@ function makeFakeReact() {
 // 在 vm 里执行 bundle，拿 factory 返回值（只为了让 __ModuleLoader__.load 被调用）
 // ---------------------------------------------------------------------------
 
-function loadModule(fetchStub, makeReact = makeFakeReact) {
+function loadModule(fetchStub, makeReact = makeFakeReact, extra = {}) {
   let entry = null
   const fakeWindow = {
     __ModuleLoader__: {
@@ -102,6 +102,8 @@ function loadModule(fetchStub, makeReact = makeFakeReact) {
     // 但仍兜一层：万一以后有人把 fetch 挪进渲染路径，也不会真联网。
     fetch: fetchStub,
     document: undefined,
+    // 额外宿主对象（比如 navigator.clipboard）：默认没有，测试按需注入。
+    ...extra,
   }
   vm.createContext(sandbox)
   vm.runInContext(SRC, sandbox, { filename: 'client.js' })
@@ -746,7 +748,6 @@ function renderBiliCard() {
   assert.ok(section, '设置页应该有「B 站」卡')
   return { section, text: renderNode(section, []).join('\n') }
 }
-
 test('设置页有 B 站登录入口：扫码按钮、textarea 占位、保存并验证、取 cookie 的说明都在', () => {
   const { section, text } = renderBiliCard()
 
@@ -768,6 +769,128 @@ test('B 站状态默认显示「未登录」，扫码入口可点、不再有占
   assert.ok(!text.includes('下一步接'), '不再留占位文案')
   assert.ok(findButton(section, '保存并验证'), '保存并验证按钮应该是可点的 button')
   assert.ok(findButton(section, '用手机扫码登录'), '扫码入口应该是可点的 button')
+})
+
+// ---------------------------------------------------------------------------
+// 「她最近自己做的事」：只读一栏 + 一条由主人发起的「问她这件事」（n213）
+// ---------------------------------------------------------------------------
+
+const WONDER_SNAP = (() => {
+  const now = Date.now()
+  return {
+    state: {
+      ok: true,
+      day: 3,
+      events: 9,
+      order: 'E=R',
+      dominance: 0.5,
+      band: null,
+      attribution: { d: 1, i: 1, null: 0, total: 2 },
+      openQuestions: 1,
+      dreams: 0,
+      verified: 0,
+      refusals: 0,
+      scars: 0,
+      recent: [],
+      affinity: { value: 5, tier: 0, label: '陌生', nextAt: 20, days: 3, earned: 5, lost: 0, masked: false },
+    },
+    nightly: {
+      ok: true,
+      now,
+      due: { ok: false, reason: '不在夜里' },
+      last: now - 3600_000,
+      lastSteps: {
+        at: now - 3600_000,
+        ok: 5,
+        skipped: 2,
+        failed: 0,
+        steps: { reflect: 'ok', mind: 'ok', questions: 'skip', dream: 'ok', verify: 'skip', learn: 'ok', room: 'skip' },
+      },
+    },
+    wonder: {
+      ok: true,
+      last: now - 2 * 86_400_000,
+      nextAt: now + 5 * 86_400_000,
+      count: 1,
+      latest: { key: 'w1', text: '为什么夜晚的风总在窗台停留？', since: now - 2 * 86_400_000, status: 'open' },
+    },
+    studies: { ok: true, count: 1, total: 2, studies: [{ key: 'k', question: '猫为什么踩奶', facts: [], sources: [], at: now - 86_400_000 }] },
+    questions: { questions: [] },
+    dreams: { dreams: [] },
+    recent: [],
+  }
+})()
+
+test('状态页有「她最近自己做的事」：六步状态、想起来的时间、自学条数、她自己那句话', () => {
+  const { text, tree } = renderStatus({ snap: WONDER_SNAP, seedOverride: WRITTEN_SEED })
+
+  assert.ok(text.includes('她最近自己做的事'), '新的一栏没渲染')
+  assert.ok(text.includes('上次夜里'), '六步那一行没渲染')
+  assert.ok(text.includes('归因 做成'), '每步的状态码应该念得出来')
+  assert.ok(text.includes('梦 做成'), '做梦那步没念出来')
+  assert.ok(text.includes('她自己想起来'), '想起来的次数没渲染')
+  assert.ok(text.includes('最近自学'), '自学那行没渲染')
+  assert.ok(text.includes('一共 2 条'), '自学条数应该用 total')
+  assert.ok(text.includes('为什么夜晚的风总在窗台停留？'), '她自己那句话应该摆出来')
+  assert.ok(findButton(tree, '问她这件事'), '应该有「问她这件事」按钮')
+})
+
+test('点「问她这件事」：把主人自己的那句话放进剪贴板，不调任何接口', async () => {
+  const written = []
+  const navigator = { clipboard: { writeText: async (t) => { written.push(String(t)) } } }
+  const fetchStub = (url, opts) => {
+    written.push(`FETCH:${url}`)
+    return Promise.resolve({ ok: true, status: 200, json: async () => ({}) })
+  }
+  const realFetch = globalThis.fetch
+  globalThis.fetch = fetchStub
+  try {
+    const react = makeFakeReact()
+    const { mod } = loadModule(fetchStub, () => react, { navigator })
+    const tree = mod.StatusTab({ snap: WONDER_SNAP, seedOverride: WRITTEN_SEED })
+    const button = findButton(tree, '问她这件事')
+    assert.ok(button, '按钮不存在')
+
+    button.props.onClick()
+    await Promise.resolve()
+
+    const line = written.find((x) => !x.startsWith('FETCH:'))
+    assert.equal(line, '你想起过「为什么夜晚的风总在窗台停留？」，你怎么想的？', '复制的内容应该是主人自己的话')
+    assert.ok(!written.some((x) => x.startsWith('FETCH:')), '点这个按钮不该发任何请求（不替她开口）')
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test('还没有自己想的问题：这一栏给一句空话，不出现「问她这件事」', () => {
+  const snap = { ...WONDER_SNAP, wonder: { ok: true, last: null, nextAt: null, count: 0, latest: null } }
+  const { text, tree } = renderStatus({ snap, seedOverride: WRITTEN_SEED })
+
+  assert.ok(text.includes('她最近自己做的事'), '卡片还在')
+  assert.ok(text.includes('还没想起来过'), '应该说还没想起来过')
+  assert.equal(findButton(tree, '问她这件事'), null, '没有问题就不该有按钮')
+})
+
+test('心理活动：自己想起来的问题带「自己想的」，梦可以点「问她这个梦」', () => {
+  const { mod } = loadClient()
+  assert.equal(typeof mod.MindTab, 'function', '模块应导出 MindTab 供测试渲染')
+  const now = Date.now()
+  const tree = mod.MindTab({
+    snap: {
+      events: [],
+      questions: {
+        questions: [{ key: 'w1', status: 'open', since: now, text: '为什么夜里的风更凉？', source: 'wonder', kind: 'about' }],
+      },
+      dreams: {
+        dreams: [{ id: 'd1', ts: now, status: 'untested', hypothesis: '猫会不会在第三次才靠近？', verified: false }],
+      },
+    },
+  })
+  const text = renderNode(tree, []).join('\n')
+
+  assert.ok(text.includes('自己想的'), 'wonder 来源应该有个小标')
+  assert.ok(text.includes('为什么夜里的风更凉？'), '问题正文没渲染')
+  assert.ok(findButton(tree, '问她这个梦'), '梦应该可以点「问她这个梦」')
 })
 
 

@@ -298,8 +298,7 @@ test('问人的问题（kind:to-you）不去查：learn 不会把它送进搜索
   store.close()
 })
 
-test('只沾一个实词不算素材：那句话留在页面上，不进 facts', async () => {
-  const store = await mkStore()
+test('只沾一个实词不算素材：那句话留在页面上，不进 facts', async () => {  const store = await mkStore()
   const url = 'https://example.com/a'
   const fetchImpl = scriptedFetch({
     items: [{ title: '猫踩奶', url, snippet: '' }],
@@ -308,5 +307,19 @@ test('只沾一个实词不算素材：那句话留在页面上，不进 facts',
   })
   const r = await study({ store, question: '猫为什么会踩奶', fetchImpl, now: NOW, maxPages: 1 })
   assert.equal(r.ok, false, '抽不出素材就不算查到')
+  store.close()
+})
+
+test('摘要兜底也要守两个实词：只沾「夜晚」的百科句子不许进', async () => {
+  // 2026-11-15 真机：问「为什么夜晚的风总在窗台停留？」，摘要剩「夜晚，拼音…」被兜底路径放进来了。
+  const store = await mkStore()
+  const url = 'https://example.com/ye'
+  const fetchImpl = scriptedFetch({
+    items: [{ title: '夜晚', url, snippet: '夜晚，拼音yè wǎn，是汉语中表示太阳落下至日出前时段的时间名词，由地球自转形成昼夜交替现象。' }],
+    pages: { [url]: undefined }, // 页面读不到 → 走摘要兜底
+  })
+  const r = await study({ store, question: '为什么夜晚的风总在窗台停留？', fetchImpl, now: NOW, maxPages: 1 })
+  assert.equal(r.ok, false, '只沾一个实词不该算查到')
+  assert.equal(store.studiesAll().length, 0, '不落 studies')
   store.close()
 })

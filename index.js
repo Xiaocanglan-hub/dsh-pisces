@@ -39,6 +39,7 @@ import { search } from './lib/search.js'
 import { listQuestions, setQuestionStatus } from './lib/questions.js'
 import { verifyDreams } from './lib/verify.js'
 import { learn as learnFromStore } from './lib/learn.js'
+import { wonder } from './lib/wonder.js'
 import { importBrain, worldSummary, worldThreads } from './lib/world.js'
 import { createNightly, inNightlyWindow, NIGHTLY_WINDOW } from './lib/nightly.js'
 import { IDLE_QUIET_MS, ranNightlyToday, shouldRunIdle } from './lib/idle-nightly.js'
@@ -1359,14 +1360,39 @@ export function apply(ctx, config = {}) {
   async function learnOnStore(s, opts = {}) {
     if (!s) return notReady()
     const o = optionsOf(opts)
+    const at = Number(o.now) || Date.now()
+    // 先让她想到一句"世界类"的问题，再让自学去查——否则问题全是问主人的，learn 永远没活干。
+    try {
+      await wonderOnce(s, at)
+    } catch (e) {
+      log(`想起来那句失败了：${errText(e)}`)
+    }
     const out = await learnFromStore({
       store: s,
-      now: Number(o.now) || Date.now(),
+      now: at,
       maxQuestions: o.maxQuestions,
       fetchImpl: o.fetchImpl,
       log,
     })
     return out ?? notReady()
+  }
+
+  /** 七天最多一句；没有模型/开关关着就安静跳过。 */
+  async function wonderOnce(s, now) {
+    if (readSettings(root)?.wonder?.enabled === false) return null
+    if (!nightlyWantsModel(cfg) || !nightlyModel) return null
+    let lines = []
+    try {
+      const all = typeof s.readAll === 'function' ? s.readAll() : []
+      lines = (all || [])
+        .filter((e) => e && (e.type === 'heard' || e.type === 'utterance'))
+        .slice(-5)
+        .map((e) => String(e.text ?? ''))
+        .filter(Boolean)
+    } catch {
+      lines = []
+    }
+    return wonder({ store: s, model: nightlyModel, now, lines, log })
   }
 
   async function learn(opts = {}) {

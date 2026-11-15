@@ -219,3 +219,67 @@ test('config：自定义窗口生效，last() 初始为 null', async () => {
   assert.equal(n.due({ now: NIGHT }).reason, '不在夜里')
   store.close()
 })
+
+// ---------------------------------------------------------------------------
+// lastSteps：只落状态码（n12 的口径：给次数与状态，不给正文）
+// ---------------------------------------------------------------------------
+
+test('lastSteps：没跑过是 null；跑完是七步状态码 + 三个计数', async () => {
+  const store = await mkStore()
+  const n = createNightly({ store, model: fakeModel('d'), learn: async () => ({ ok: true, studied: 1 }) })
+  assert.equal(n.lastSteps(), null, '没跑过应该是 null')
+
+  await n.run({ now: NIGHT, force: true })
+  const s = n.lastSteps()
+  assert.ok(s, '跑完应该有一行状态')
+  assert.equal(s.at, NIGHT)
+  assert.deepEqual(Object.keys(s.steps).sort(), ['dream', 'learn', 'mind', 'questions', 'reflect', 'room', 'verify'])
+  for (const [k, code] of Object.entries(s.steps)) assert.ok(['ok', 'skip', 'fail'].includes(code), `${k} 状态码不对：${code}`)
+  assert.equal(s.steps.learn, 'ok')
+  assert.equal(s.steps.room, 'skip', '没接客厅吸收就是跳过')
+  assert.equal(s.ok + s.skipped + s.failed, 7)
+  assert.ok(s.ok >= 5)
+  store.close()
+})
+
+test('lastSteps：某一步失败记 fail，prompt/error 正文一个字都不落', async () => {
+  const store = await mkStore()
+  const n = createNightly({
+    store,
+    model: fakeModel('d'),
+    learn: async () => {
+      throw new Error('搜索挂了：R星账号')
+    },
+  })
+  await n.run({ now: NIGHT, force: true })
+
+  const s = n.lastSteps()
+  assert.equal(s.steps.learn, 'fail')
+  assert.equal(s.failed, 1)
+  const raw = String(store.modeGet('nightly.lastSteps'))
+  assert.ok(!raw.includes('搜索挂了'), '不该把 error 正文写进去')
+  assert.ok(!raw.includes('R星'), '不该把错误里的词写进去')
+  store.close()
+})
+
+test('lastSteps：dryRun 不落盘；别人的 modes 不受影响', async () => {
+  const store = await mkStore()
+  const n = createNightly({ store, model: fakeModel('d') })
+  await n.run({ now: NIGHT, dryRun: true })
+  assert.equal(n.lastSteps(), null, 'dryRun 不写')
+  assert.equal(store.modeGet('nightly.lastSteps'), null)
+  store.close()
+})
+
+test('summarizeSteps：纯函数，缺步算跳过、ok:false 算没成', async () => {
+  const { summarizeSteps } = await import('../lib/nightly.js')
+  const s = summarizeSteps({ reflect: { ok: true }, dream: { ok: false }, learn: { ok: true, skipped: true } }, 123)
+  assert.equal(s.at, 123)
+  assert.equal(s.steps.reflect, 'ok')
+  assert.equal(s.steps.dream, 'fail')
+  assert.equal(s.steps.learn, 'skip')
+  assert.equal(s.steps.mind, 'skip', '没跑的步算跳过')
+  assert.equal(s.ok, 1)
+  assert.equal(s.failed, 1)
+  assert.equal(s.skipped, 5)
+})

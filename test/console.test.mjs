@@ -13,6 +13,7 @@ import { SCHEMA, publicSettings, readSettings, writeSettings } from '../lib/sett
 import { NICKNAME_MAX, nicknameOf, setNickname as writeNickname } from '../lib/nickname.js'
 import { BAIDU_FILE, TBS_API, USERINFO_API, loginBaidu, readBaidu } from '../lib/baidu.js'
 import { OWNER_FILE, loginBili, readBili } from '../lib/bili.js'
+import { WONDER_GAP_MS, WONDER_LAST_KEY } from '../lib/wonder.js'
 
 const NOW = Date.parse('2026-11-09T12:00:00+08:00')
 const DAY = 86_400_000
@@ -406,6 +407,79 @@ test('/nightly 与 /nightly/run：due+last；force/dryRun 透传', async () => {
     await call('POST', '/nightly/run', {}, { nightly: { due: () => ({ ok: true }), run: () => { throw new Error('炸了') } } }),
   )
   assert.equal(thrown.ok, false)
+})
+
+test('/wonder：只回时间、次数和那一句问题；缺 dep 不抛', async () => {
+  const store = await mkStore()
+  const LAST = NOW - 2 * 86_400_000
+  store.modeSet(WONDER_LAST_KEY, String(LAST))
+  const rows = [
+    { key: 'w1', kind: 'about', text: '为什么夜晚的风总在窗台停留？', status: 'open', since: NOW - 1000, refs: ['e1'], source: 'wonder' },
+    { key: 'q2', kind: 'to-you', text: '你今天累不累？', status: 'open', since: NOW, refs: [], source: '' },
+  ]
+  const questions = { list: async () => rows, setStatus: async () => true }
+
+  const res = await call('GET', '/wonder', undefined, { store, questions })
+  assert.equal(res.status, 200)
+  assertJsonHeaders(res)
+  const body = payload(res)
+  assert.equal(body.ok, true)
+  assert.equal(body.last, LAST)
+  assert.equal(body.nextAt, LAST + WONDER_GAP_MS, '下一次最早是上次 + 七天')
+  assert.equal(body.count, 1, '只算 source=wonder 的那句')
+  assert.equal(body.latest.text, '为什么夜晚的风总在窗台停留？')
+  assert.equal(body.latest.status, 'open')
+  // 只给她自己那句话；refs / 提示词 / 模型输出都不往外给。
+  assert.equal(Object.prototype.hasOwnProperty.call(body.latest, 'refs'), false)
+
+  // 只有库、没有 questions：仍然 200，次数 0。
+  const half = payload(await call('GET', '/wonder', undefined, { store }))
+  assert.equal(half.ok, true)
+  assert.equal(half.count, 0)
+  assert.equal(half.latest, null)
+
+  // 什么都没有：503 JSON，不抛。
+  const none = await call('GET', '/wonder', undefined, {})
+  assert.equal(none.status, 503)
+  assert.equal(payload(none).ok, false)
+
+  // 只读：POST 405。
+  assert.equal((await call('POST', '/wonder', {}, { store, questions })).status, 405)
+  store.close()
+})
+
+test('/wonder：questions.list 抛错也只回空，不 500', async () => {
+  const store = await mkStore()
+  const questions = {
+    list: async () => {
+      throw new Error('表坏了')
+    },
+  }
+  const res = await call('GET', '/wonder', undefined, { store, questions })
+  assert.equal(res.status, 200)
+  assert.equal(payload(res).count, 0)
+  store.close()
+})
+
+test('/nightly：lastSteps 原样带上（只有状态码），没有这个方法就是 null', async () => {
+  const LAST = NOW - 3600000
+  const steps = { at: LAST, ok: 5, skipped: 2, failed: 0, steps: { reflect: 'ok', mind: 'ok', dream: 'skip' } }
+  const info = payload(
+    await call('GET', '/nightly', undefined, {
+      nightly: { due: () => ({ ok: false, reason: '不在夜里' }), last: () => LAST, lastSteps: () => steps },
+    }),
+  )
+  assert.deepEqual(info.lastSteps, steps)
+
+  const old = payload(await call('GET', '/nightly', undefined, { nightly: { due: () => ({ ok: false }), last: () => LAST } }))
+  assert.equal(old.lastSteps, null, '老实例没有 lastSteps 就给 null')
+
+  const thrown = payload(
+    await call('GET', '/nightly', undefined, {
+      nightly: { due: () => ({ ok: false }), last: () => LAST, lastSteps: () => { throw new Error('炸了') } },
+    }),
+  )
+  assert.equal(thrown.lastSteps, null, '读状态抛错也不拖垮整个接口')
 })
 
 test('/studies、/learn、/verify：装了就 200，没装就 503 且不抛', async () => {
